@@ -8,10 +8,17 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_set_source', 'Set Pine Script source code in the editor', {
+  server.tool('pine_editor_state', 'Which script the Pine Editor is bound to (title), whether it has unsaved changes, and buffer size. Call before pine_set_source / pine_new / pine_open.', {}, async () => {
+    try { return jsonResult(await core.getEditorState()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_set_source', 'Replace the Pine Editor buffer with new source. SAFE: refuses if the editor has unsaved changes, and refuses to overwrite a saved script unless `target` names it (or force:true). Use pine_new first for a fresh script.', {
     source: z.string().describe('Pine Script source code to inject'),
-  }, async ({ source }) => {
-    try { return jsonResult(await core.setSource({ source })); }
+    target: z.string().optional().describe('Name of the saved script you intend to overwrite (must equal the editor title). Omit when the editor holds an untitled script.'),
+    force: z.boolean().optional().describe('Bypass the unsaved-changes / saved-script guards. Dangerous — only when the user explicitly wants the current buffer discarded.'),
+  }, async ({ source, target, force }) => {
+    try { return jsonResult(await core.setSource({ source, target, force })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -25,8 +32,10 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S)', {}, async () => {
-    try { return jsonResult(await core.save()); }
+  server.tool('pine_save', 'Save the current Pine Script via the editor menu (Save script). Handles the name dialog for untitled scripts. Returns success:false if TradingView did not register the save.', {
+    name: z.string().optional().describe('Name to give an untitled script when the Save dialog appears (defaults to what TradingView pre-fills).'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.save({ name })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -40,18 +49,20 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_new', 'Create a new blank Pine Script', {
+  server.tool('pine_new', 'Create a genuinely new Pine Script through the editor menu (Create new → Indicator/Strategy/Library), binding the editor to a fresh "Untitled script". SAFE: refuses if the current script has unsaved changes (unless force:true).', {
     type: z.enum(['indicator', 'strategy', 'library']).describe('Type of script to create'),
-  }, async ({ type }) => {
-    try { return jsonResult(await core.newScript({ type })); }
+    force: z.boolean().optional().describe('Proceed even if the current buffer has unsaved changes (they may be lost).'),
+  }, async ({ type, force }) => {
+    try { return jsonResult(await core.newScript({ type, force })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_open', 'Open a saved Pine Script by name', {
+  server.tool('pine_open', 'Open a saved Pine Script by name through the editor\'s Open dialog, so the editor is actually bound to it. SAFE: refuses if the current script has unsaved changes (unless force:true).', {
     name: z.string().describe('Name of the saved script to open (case-insensitive match)'),
-  }, async ({ name }) => {
-    try { return jsonResult(await core.openScript({ name })); }
-    catch (err) { return jsonResult({ success: false, source: 'internal_api', error: err.message }, true); }
+    force: z.boolean().optional().describe('Proceed even if the current buffer has unsaved changes (they may be lost).'),
+  }, async ({ name, force }) => {
+    try { return jsonResult(await core.openScript({ name, force })); }
+    catch (err) { return jsonResult({ success: false, source: 'ui', error: err.message }, true); }
   });
 
   server.tool('pine_list_scripts', 'List saved Pine Scripts', {}, async () => {
