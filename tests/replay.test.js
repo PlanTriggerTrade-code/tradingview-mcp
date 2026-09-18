@@ -257,29 +257,47 @@ describe('autoplay() — delay validation', () => {
 // ── stop() ───────────────────────────────────────────────────────────────
 
 describe('stop()', () => {
-  it('calls stopReplay when started', async () => {
+  it('calls goToRealtime when started', async () => {
     const { _deps, evaluate } = mockDeps({
       'isReplayStarted': true,
-      'stopReplay': undefined,
+      'goToRealtime': undefined,
     });
     const result = await stop({ _deps });
     assert.equal(result.success, true);
     assert.equal(result.action, 'replay_stopped');
+    const realtimeCall = evaluate.calls.find(c => c.includes('goToRealtime'));
+    assert.ok(realtimeCall, 'goToRealtime was called');
+  });
+
+  it('does not call stopReplay before goToRealtime', async () => {
+    // stopReplay() disables the replay UI mode without clearing the manager's
+    // session. Calling it first desyncs the two, and the follow-up
+    // goToRealtime() then throws "Assertion failed: Replay is not started",
+    // leaving the chart parked on a historical bar until a page reload.
+    const { _deps, evaluate } = mockDeps({
+      'isReplayStarted': true,
+      'goToRealtime': undefined,
+    });
+    await stop({ _deps });
     const stopCall = evaluate.calls.find(c => c.includes('stopReplay'));
-    assert.ok(stopCall, 'stopReplay was called');
+    assert.equal(stopCall, undefined, 'stopReplay must not be called');
   });
 
   it('returns already_stopped when not started', async () => {
     const { _deps, evaluate } = mockDeps({ 'isReplayStarted': false });
     const result = await stop({ _deps });
     assert.equal(result.action, 'already_stopped');
-    const stopCall = evaluate.calls.find(c => c.includes('stopReplay'));
-    assert.equal(stopCall, undefined, 'stopReplay not called');
+    const realtimeCall = evaluate.calls.find(c => c.includes('goToRealtime'));
+    assert.equal(realtimeCall, undefined, 'goToRealtime not called');
   });
 
   it('does not call hideReplayToolbar', () => {
     const source = readFileSync(new URL('../src/core/replay.js', import.meta.url), 'utf8');
-    assert.ok(!source.includes('hideReplayToolbar'), 'hideReplayToolbar must not appear anywhere');
+    // Strip comments first: the explanation of why this call is banned names it.
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    assert.ok(!code.includes('hideReplayToolbar'), 'hideReplayToolbar must not appear in code');
   });
 });
 
