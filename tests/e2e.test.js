@@ -146,14 +146,44 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     });
 
     it('tv_launch — auto-detect binary (verify path resolution only)', async () => {
-      // tv_launch is destructive (kills TradingView), so we only test path detection
+      // tv_launch is destructive (kills TradingView), so we only test path detection.
+      // Mirrors the candidate lists in src/core/health.js launch().
       const { existsSync } = await import('fs');
-      const paths = [
-        '/Applications/TradingView.app/Contents/MacOS/TradingView',
-        `${process.env.HOME}/Applications/TradingView.app/Contents/MacOS/TradingView`,
-      ];
-      const found = paths.some(p => existsSync(p));
-      assert.ok(found, 'TradingView binary found on disk');
+      const { execSync } = await import('child_process');
+      const paths = {
+        darwin: [
+          '/Applications/TradingView.app/Contents/MacOS/TradingView',
+          `${process.env.HOME}/Applications/TradingView.app/Contents/MacOS/TradingView`,
+        ],
+        win32: [
+          `${process.env.LOCALAPPDATA}\\TradingView\\TradingView.exe`,
+          `${process.env.PROGRAMFILES}\\TradingView\\TradingView.exe`,
+          `${process.env['PROGRAMFILES(X86)']}\\TradingView\\TradingView.exe`,
+        ],
+        linux: [
+          '/opt/TradingView/tradingview',
+          '/opt/TradingView/TradingView',
+          `${process.env.HOME}/.local/share/TradingView/TradingView`,
+          '/usr/bin/tradingview',
+          '/snap/tradingview/current/tradingview',
+        ],
+      }[process.platform] || [];
+
+      let found = paths.some(p => p && existsSync(p));
+
+      // Windows ships TradingView as an MSIX package: the binary lives under
+      // WindowsApps and is only discoverable via Get-AppxPackage.
+      if (!found && process.platform === 'win32') {
+        try {
+          const installDir = execSync(
+            'powershell -NoProfile -Command "(Get-AppxPackage -Name \'TradingView.Desktop\' -ErrorAction SilentlyContinue).InstallLocation"',
+            { timeout: 10000 }
+          ).toString().trim();
+          if (installDir) found = existsSync(`${installDir}\\TradingView.exe`);
+        } catch { /* ignore */ }
+      }
+
+      assert.ok(found, `TradingView binary found on disk (${process.platform})`);
     });
   });
 
@@ -936,14 +966,23 @@ val = array.get(a, 5)`;
     });
 
     it('draw_shape — create horizontal line', async () => {
-      const quote = await evaluate(`
-        (function() {
-          var bars = ${BARS_PATH};
-          var last = bars.valueAt(bars.lastIndex());
-          return last ? { time: last[0], price: last[4] } : null;
-        })()
-      `);
-      if (!quote) return;
+      // Bars can be momentarily unavailable while the chart settles after the
+      // preceding suites, so retry instead of skipping: a silent skip here left
+      // no shape on the chart and surfaced as a confusing failure in draw_list.
+      let quote = null;
+      for (let i = 0; i < 20; i++) {
+        quote = await evaluate(`
+          (function() {
+            var bars = ${BARS_PATH};
+            if (!bars) return null;
+            var last = bars.valueAt(bars.lastIndex());
+            return last ? { time: last[0], price: last[4] } : null;
+          })()
+        `);
+        if (quote) break;
+        await sleep(250);
+      }
+      assert.ok(quote, 'Last bar available to anchor the shape');
 
       const result = await evaluate(`
         (function() {
@@ -960,12 +999,19 @@ val = array.get(a, 5)`;
     });
 
     it('draw_list — list drawings', async () => {
-      const shapes = await evaluate(`
-        (function() {
-          var all = ${CHART_API}.getAllShapes();
-          return all.map(function(s) { return { id: s.id, name: s.name }; });
-        })()
-      `);
+      // Lists the shape created by the previous test. createShape() returns its
+      // id before the shape is registered on the chart model, so poll briefly.
+      let shapes = null;
+      for (let i = 0; i < 20; i++) {
+        shapes = await evaluate(`
+          (function() {
+            var all = ${CHART_API}.getAllShapes();
+            return all.map(function(s) { return { id: s.id, name: s.name }; });
+          })()
+        `);
+        if (Array.isArray(shapes) && shapes.length > 0) break;
+        await sleep(250);
+      }
       assert.ok(Array.isArray(shapes), 'Shapes is array');
       assert.ok(shapes.length > 0, 'Has at least one shape');
     });
@@ -1158,14 +1204,14 @@ val = array.get(a, 5)`;
   describe('Replay Mode', () => {
 
     after(async () => {
-      // Ensure replay is stopped
+      // Ensure replay is stopped. goToRealtime() alone both ends the session and
+      // returns the chart to the live edge — see the replay_stop test below for
+      // why stopReplay() and hideReplayToolbar() must not be used here.
       try {
         const rp = REPLAY_API;
         const started = await evaluate(wv(`${rp}.isReplayStarted()`));
         if (started) {
-          await evaluate(`${rp}.stopReplay()`);
           await evaluate(`${rp}.goToRealtime()`);
-          await evaluate(`${rp}.hideReplayToolbar()`);
           await sleep(500);
         }
       } catch {}
@@ -1240,9 +1286,18 @@ val = array.get(a, 5)`;
       const started = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
       if (!started) return;
 
-      await evaluate(`${REPLAY_API}.stopReplay()`);
+      // Mirrors core/replay.js stop(): goToRealtime() is the only call that both
+      // ends the replay session and scrolls back to the live edge.
+      //
+      // stopReplay() must NOT be called first — it disables the replay UI mode
+      // without clearing the manager's session, which desyncs the two so that
+      // goToRealtime() then throws "Assertion failed: Replay is not started" and
+      // leaves the chart stuck on a historical bar until a page reload.
+      //
+      // hideReplayToolbar() must NOT be called at all — it syncs hidden-toolbar
+      // state to the user's TradingView cloud account and permanently breaks
+      // replay controls on every device they use (see #19).
       await evaluate(`${REPLAY_API}.goToRealtime()`);
-      await evaluate(`${REPLAY_API}.hideReplayToolbar()`);
       await sleep(500);
 
       const stoppedNow = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
