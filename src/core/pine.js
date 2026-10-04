@@ -35,6 +35,43 @@ const FIND_MONACO = `
   })()
 `;
 
+// The Pine Editor's add/update-to-chart control is an ICON-ONLY button on
+// TradingView Desktop 3.4.x: no text, and no title until a script has been
+// added once (then it gains title="Update on chart"). Matching on text alone
+// silently falls through to the Save button, which reports success while
+// never putting the study on the chart. Identify it by title, then by its
+// SVG path, before falling back to text.
+const RUN_BUTTON_SVG_PREFIX = 'm10.82 6.82';
+
+const FIND_RUN_BUTTON = `
+  (function findRunButton() {
+    var btns = document.querySelectorAll('button');
+    var byTitle = null, byText = null, byPath = null, saveBtn = null;
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      var r = b.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      var text = (b.textContent || '').trim();
+      if (/save and add to chart/i.test(text)) return { el: b, how: 'Save and add to chart' };
+      var attr = (b.getAttribute('title') || '') + ' ' + (b.getAttribute('aria-label') || '');
+      if (!byTitle && /(add to chart|update on chart)/i.test(attr)) byTitle = b;
+      if (!byText && /^(Add to chart|Update on chart)/i.test(text)) byText = b;
+      if (!byPath) {
+        var pathEl = b.querySelector('svg path');
+        var d = pathEl ? (pathEl.getAttribute('d') || '') : '';
+        if (d.indexOf('${RUN_BUTTON_SVG_PREFIX}') === 0) byPath = b;
+      }
+      if (!saveBtn && b.className.indexOf('saveButton') !== -1) saveBtn = b;
+    }
+    if (byTitle) return { el: byTitle, how: (byTitle.getAttribute('title') || 'Add to chart').trim() };
+    if (byText)  return { el: byText,  how: byText.textContent.trim() };
+    if (byPath)  return { el: byPath,  how: 'Add to chart (icon)' };
+    if (saveBtn) return { el: saveBtn, how: 'Pine Save' };
+    return null;
+  })()
+`;
+
+
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
  * Returns true if editor is accessible, false on timeout.
@@ -313,25 +350,10 @@ export async function compile() {
 
   const clicked = await evaluate(`
     (function() {
-      var btns = document.querySelectorAll('button');
-      var fallback = null;
-      var saveBtn = null;
-      for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/save and add to chart/i.test(text)) {
-          btns[i].click();
-          return 'Save and add to chart';
-        }
-        if (!fallback && /^(Add to chart|Update on chart)/i.test(text)) {
-          fallback = btns[i];
-        }
-        if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) {
-          saveBtn = btns[i];
-        }
-      }
-      if (fallback) { fallback.click(); return fallback.textContent.trim(); }
-      if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
-      return null;
+      var found = ${FIND_RUN_BUTTON};
+      if (!found) return null;
+      found.el.click();
+      return found.how;
     })()
   `);
 
@@ -468,24 +490,10 @@ export async function smartCompile() {
 
   const buttonClicked = await evaluate(`
     (function() {
-      var btns = document.querySelectorAll('button');
-      var addBtn = null;
-      var updateBtn = null;
-      var saveBtn = null;
-      for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/save and add to chart/i.test(text)) {
-          btns[i].click();
-          return 'Save and add to chart';
-        }
-        if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
-        if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];
-        if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
-      }
-      if (addBtn) { addBtn.click(); return 'Add to chart'; }
-      if (updateBtn) { updateBtn.click(); return 'Update on chart'; }
-      if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
-      return null;
+      var found = ${FIND_RUN_BUTTON};
+      if (!found) return null;
+      found.el.click();
+      return found.how;
     })()
   `);
 
