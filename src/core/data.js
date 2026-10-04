@@ -520,13 +520,34 @@ export async function getStudyValues() {
               }
             }
           } catch(e) {}
+          // The data window above follows the crosshair: with the mouse resting on
+          // the chart it shows THAT bar, not the latest one. Read the latest bar
+          // straight from the study's own series too (value[0] = bar time,
+          // value[i + 1] = metaInfo().plots[i]); titled plots only.
+          var lastBarValues = {};
+          var lastBarTime = null;
+          try {
+            var last = s.data && s.data() && s.data().last ? s.data().last() : null;
+            if (last && last.value) {
+              lastBarTime = last.value[0];
+              var plots = meta.plots || [];
+              for (var p = 0; p < plots.length; p++) {
+                var style = meta.styles && meta.styles[plots[p].id];
+                var v = last.value[p + 1];
+                if (style && style.title && typeof v === 'number' && isFinite(v)) lastBarValues[style.title] = v;
+              }
+            }
+          } catch(e) {}
           // Include id + inputs so multiple instances of the same indicator
           // (e.g. two EMAs with different lengths) are distinguishable (#143).
           var id = null;
           try { id = s.id ? s.id() : null; } catch(e) {}
           var inputs = null;
           try { var ip = s.inputs ? s.inputs() : null; if (ip && Object.keys(ip).length) inputs = ip; } catch(e) {}
-          if (Object.keys(values).length > 0) results.push({ id: id, name: name, inputs: inputs, values: values });
+          if (Object.keys(values).length > 0 || Object.keys(lastBarValues).length > 0) {
+            results.push({ id: id, name: name, inputs: inputs, values: values,
+                           last_bar_time: lastBarTime, last_bar_values: lastBarValues });
+          }
         } catch(e) {}
       }
       return results;
