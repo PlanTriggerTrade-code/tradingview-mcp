@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import { booleanParam } from './_schema.js';
 import * as core from '../core/health.js';
-import { update } from '../core/update.js';
 
 export function registerHealthTools(server) {
   server.tool('tv_health_check', 'Check CDP connection to TradingView and return current chart state', {}, async () => {
@@ -28,8 +27,4 @@ export function registerHealthTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('tv_update', 'Update this MCP server to the latest version: git fast-forward of origin/main + npm ci when dependencies changed. Safe by design — refuses on non-git installs, dirty working trees, non-main branches, or diverged history. After a successful update the MCP server must be restarted to load the new code.', {}, async () => {
-    try { return jsonResult(await update({})); }
-    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
-  });
 }

@@ -1,6 +1,5 @@
 import { register } from '../router.js';
 import * as core from '../../core/health.js';
-import { update } from '../../core/update.js';
 
 register('status', {
   description: 'Check CDP connection to TradingView',
@@ -19,7 +18,3 @@ register('launch', {
   }),
 });
 
-register('update', {
-  description: 'Update to the latest version (git fast-forward + npm ci if deps changed)',
-  handler: () => update({}),
-});
