@@ -45,7 +45,22 @@ export function safeString(str) {
  * Prevents corrupt values from reaching TradingView APIs that persist to cloud state.
  */
 export function requireFinite(value, name) {
-  const n = Number(value);
+  // Number() is a conversion, not a check. Number('') and Number([]) are 0,
+  // Number([5]) is 5, Number(true) is 1 — so an empty string, an array or a
+  // boolean becomes a valid-looking number instead of an error, while 'abc'
+  // and undefined are rejected. Callers use the returned value, so the result
+  // is a silently wrong coordinate rather than a failure: an alert created at
+  // price 0 instead of a complaint about the price.
+  //
+  // null is left coercing to 0 on purpose. tests/sanitization.test.js pins
+  // that, so it is a deliberate choice rather than an oversight.
+  if (value === null) return 0;
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : NaN;
   if (!Number.isFinite(n)) throw new Error(`${name} must be a finite number, got: ${value}`);
   return n;
 }
