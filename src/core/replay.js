@@ -99,7 +99,20 @@ export async function stop({ _deps } = {}) {
   if (!started) {
     return { success: true, action: 'already_stopped' };
   }
-  await evaluate(`${rp}.stopReplay()`);
+  // goToRealtime() ends the replay session *and* scrolls the chart back to the
+  // live edge. stopReplay() only routes through requestCloseReplay(), which
+  // calls _setReplayModeEnabled(false) and disconnects the session without ever
+  // clearing the replay manager's state — so the chart stays parked on the
+  // historical bar and isReplayStarted() keeps reporting true. Calling
+  // stopReplay() first also desyncs the manager, after which goToRealtime()
+  // throws "Assertion failed: Replay is not started" and the chart is stuck
+  // until the page is reloaded.
+  //
+  // Deliberately NOT calling hideReplayToolbar(): it syncs hidden-toolbar state
+  // to the user's TradingView cloud account and permanently breaks replay
+  // controls across all their devices (see #19). Leaving the toolbar visible is
+  // harmless — the user can dismiss it themselves.
+  await evaluate(`${rp}.goToRealtime()`);
   return { success: true, action: 'replay_stopped' };
 }
 
