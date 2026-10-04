@@ -19,25 +19,32 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_strategy_results', 'Get strategy performance metrics from Strategy Tester. Auto-opens the panel and auto-unhides a hidden strategy (TradingView never computes reports for hidden strategies); result includes unhidden_strategies when that happened.', {}, async () => {
-    try { return jsonResult(await core.getStrategyResults()); }
+  const strategyParam = z.string().optional().describe('Strategy name (substring, case-insensitive) when the chart has more than one. Default: the first strategy with a computed report.');
+
+  server.tool('data_get_strategy_results', 'Get Strategy Tester results: `metrics` (headline numbers; *_pct fields are percentages), the full raw `performance` object, currency, initial_capital, date_range, trade_count and open_trades. Picks the strategy whose report is computed; never unhides anything. Hidden strategies have no report.', {
+    strategy: strategyParam,
+  }, async ({ strategy }) => {
+    try { return jsonResult(await core.getStrategyResults({ strategy })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_trades', 'Get trade list from Strategy Tester. Auto-opens the panel and auto-unhides a hidden strategy.', {
-    max_trades: z.coerce.number().optional().describe('Maximum trades to return'),
-  }, async ({ max_trades }) => {
-    try { return jsonResult(await core.getTrades({ max_trades })); }
+  server.tool('data_get_trades', 'Get the Strategy Tester trade list: the most recent trades (oldest first) with side, entry/exit, P&L, run-up, drawdown and cumulative P&L. Open trades are flagged open:true with a mark_price instead of exit fields.', {
+    max_trades: z.coerce.number().optional().describe('Maximum trades to return (default 20, max 500)'),
+    strategy: strategyParam,
+  }, async ({ max_trades, strategy }) => {
+    try { return jsonResult(await core.getTrades({ max_trades, strategy })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_equity', 'Get equity curve data from Strategy Tester', {}, async () => {
-    try { return jsonResult(await core.getEquity()); }
+  server.tool('data_get_equity', 'Get the strategy equity curve: account equity after each closed trade (initial capital + cumulative P&L), plus open P&L.', {
+    strategy: strategyParam,
+  }, async ({ strategy }) => {
+    try { return jsonResult(await core.getEquity({ strategy })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('quote_get', 'Get real-time quote data for a symbol (price, OHLC, volume). If symbol is provided and differs from the current chart, the chart is briefly switched to fetch the quote and then restored — adds ~1-2s and serializes parallel calls.', {
-    symbol: z.string().optional().describe('Symbol to quote (blank = current chart symbol). Non-blank values cause a chart switch + restore.'),
+  server.tool('quote_get', 'Get a real-time quote (last, bid/ask, OHLC, previous close, change, volume, session) for any symbol, from the TradingView quote feed. Does not touch the chart. Blank symbol = the chart symbol, plus its latest bar (replay-aware).', {
+    symbol: z.string().optional().describe('Symbol to quote, ideally EXCHANGE:SYMBOL (e.g. "NASDAQ:AAPL", "CME_MINI:ES1!"). Blank = current chart symbol.'),
   }, async ({ symbol }) => {
     try { return jsonResult(await core.getQuote({ symbol })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

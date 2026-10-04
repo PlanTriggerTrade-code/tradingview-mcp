@@ -60,18 +60,25 @@ register('data', {
     }],
     ['strategy', {
       description: 'Get strategy performance metrics',
-      handler: () => core.getStrategyResults(),
+      options: {
+        name: { type: 'string', short: 's', description: 'Strategy name substring (when the chart has several)' },
+      },
+      handler: (opts) => core.getStrategyResults({ strategy: opts.name }),
     }],
     ['trades', {
-      description: 'Get strategy trade list',
+      description: 'Get strategy trade list (most recent first)',
       options: {
         max: { type: 'string', short: 'n', description: 'Max trades to return' },
+        name: { type: 'string', short: 's', description: 'Strategy name substring (when the chart has several)' },
       },
-      handler: (opts) => core.getTrades({ max_trades: opts.max ? Number(opts.max) : undefined }),
+      handler: (opts) => core.getTrades({ max_trades: opts.max ? Number(opts.max) : undefined, strategy: opts.name }),
     }],
     ['equity', {
       description: 'Get strategy equity curve',
-      handler: () => core.getEquity(),
+      options: {
+        name: { type: 'string', short: 's', description: 'Strategy name substring (when the chart has several)' },
+      },
+      handler: (opts) => core.getEquity({ strategy: opts.name }),
     }],
     ['depth', {
       description: 'Get order book / DOM data',

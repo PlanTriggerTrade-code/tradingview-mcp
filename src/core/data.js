@@ -2,10 +2,9 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
-import { waitForChartReady } from '../wait.js';
 
 const MAX_OHLCV_BARS = 500;
-const MAX_TRADES = 20;
+const MAX_TRADES = 500;
 
 // Round to 8 dp — enough to kill float noise (29899.999999997 → 29900) without
 // destroying precision on forex/crypto prices. The old 2-dp rounding flattened
@@ -13,75 +12,6 @@ const MAX_TRADES = 20;
 const roundPrice = (v) => (v == null ? null : Math.round(v * 1e8) / 1e8);
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
-
-// Serializes getQuote() calls that mutate chart symbol so concurrent callers
-// can't race over the shared chart state. JS is single-threaded but our
-// awaits interleave; without this every parallel quote_get(symbol) would
-// read whichever symbol the chart happened to be on at evaluate() time.
-let _quoteLock = Promise.resolve();
-
-// Shared page-context JS: locate the strategy data source. Strategies are
-// identified by metaInfo().isTVScriptStrategy / is_strategy — NOT by
-// is_price_study===false (that was the #48/#173/#181 bug: strategies actually
-// have is_price_study===true, so the old check excluded every one). Falls
-// back to any source exposing reportData/ordersData.
-const FIND_STRATEGY_JS = `
-  function _reportOf(s) {
-    try { var rd = s.reportData(); if (rd && typeof rd.value === 'function') rd = rd.value(); return rd; } catch (e) { return null; }
-  }
-  function findStrategies() {
-    var chart = ${CHART_API}._chartWidget;
-    var sources = chart.model().model().dataSources();
-    var strategies = [];
-    for (var i = 0; i < sources.length; i++) {
-      var s = sources[i], mi = null;
-      try { mi = s.metaInfo ? s.metaInfo() : null; } catch (e) {}
-      var isStrat = mi && (mi.isTVScriptStrategy || mi.is_strategy);
-      if ((isStrat || typeof s.reportData === 'function') && typeof s.reportData === 'function') {
-        strategies.push({ s: s, name: mi ? mi.description : null });
-      }
-    }
-    return strategies;
-  }
-  // Returns { strat, report } — prefers a strategy whose report is actually
-  // computed (the one selected in the Strategy Tester panel). With multiple
-  // strategies on the chart, only the selected one has non-null reportData,
-  // so returning the first strategy blindly reads the wrong (empty) one.
-  function findStrategy() {
-    var strategies = findStrategies();
-    // Prefer one with a computed report (has .performance).
-    for (var j = 0; j < strategies.length; j++) {
-      var rd = _reportOf(strategies[j].s);
-      if (rd && rd.performance) return { strat: strategies[j].s, report: rd, name: strategies[j].name, strategy_count: strategies.length };
-    }
-    // None computed — return the first so callers can hint "open the panel".
-    if (strategies.length) return { strat: strategies[0].s, report: null, name: strategies[0].name, strategy_count: strategies.length };
-    return null;
-  }
-  // TradingView never computes a report for a hidden strategy (crossed-out eye
-  // in the legend), so a hidden one looks identical to "panel not opened yet".
-  // Unhide any hidden strategies and report their names so callers can tell
-  // the user what changed.
-  function unhideStrategies() {
-    var unhidden = [];
-    var strategies = findStrategies();
-    for (var i = 0; i < strategies.length; i++) {
-      var s = strategies[i].s;
-      try {
-        var vis = null;
-        try { vis = s.properties().visible.value(); } catch (e) {}
-        if (vis !== false) continue;
-        var done = false;
-        try { s.properties().visible.setValue(true); done = true; } catch (e) {}
-        if (!done) {
-          try { var st = ${CHART_API}.getStudyById(s.id()); if (st) { st.setVisible(true); done = true; } } catch (e) {}
-        }
-        if (done) unhidden.push(strategies[i].name || 'strategy');
-      } catch (e) {}
-    }
-    return unhidden;
-  }
-`;
 
 function buildGraphicsJS(collectionName, mapKey, filter) {
   return `
@@ -207,246 +137,321 @@ export async function getIndicator({ entity_id }) {
   return { success: true, entity_id, visible: data?.visible, inputs };
 }
 
-// #173: TradingView doesn't compute strategy report/orders until the Strategy
-// Tester panel is opened — and never computes one for a hidden strategy.
-// Ensure the panel is open (via bottomWidgetBar), unhide any hidden
-// strategies, and wait for reportData to populate, so the strategy read tools
-// work even when the panel started closed or the strategy was hidden.
-// Returns { status, unhidden } — unhidden lists strategies made visible.
-async function ensureStrategyTesterReady(maxWaitMs = 6000) {
-  const unhidden = await evaluate(`
-    (function() {
-      ${FIND_STRATEGY_JS}
-      try {
-        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-        if (bwb && typeof bwb.showWidget === 'function') bwb.showWidget('backtesting');
-      } catch (e) {}
-      return unhideStrategies();
-    })()
-  `);
-  const deadline = Date.now() + maxWaitMs;
-  let status = 'timeout';
-  while (Date.now() < deadline) {
-    const ready = await evaluate(`
-      (function() {
-        ${FIND_STRATEGY_JS}
-        var f = findStrategy();
-        if (!f) return 'no-strategy';
-        return f.report && f.report.performance ? 'ready' : 'pending';
-      })()
-    `);
-    if (ready === 'ready' || ready === 'no-strategy') { status = ready; break; }
-    await new Promise(r => setTimeout(r, 500));
+// Shared page-context JS for the strategy tools. Strategies are identified by
+// metaInfo().isTVScriptStrategy / is_strategy (#48/#173/#181: they report
+// is_price_study===true, so that flag can't be used to find them).
+//
+// A chart can hold several strategies, including hidden copies of the same
+// one, and TradingView only computes a report for visible strategies. So pick
+// the first strategy (optionally filtered by name) whose report is computed,
+// rather than the first strategy in the list. Hidden strategies are reported,
+// never unhidden: toggling visibility is saved into the user's layout.
+const STRATEGY_JS = (nameFilter) => `
+  function _reportOf(s) {
+    try { var rd = s.reportData(); if (rd && typeof rd.value === 'function') rd = rd.value(); return rd; } catch (e) { return null; }
   }
-  return { status, unhidden: unhidden || [] };
-}
+  function listStrategies() {
+    var sources = ${CHART_API}._chartWidget.model().model().dataSources();
+    var out = [];
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i], mi = null;
+      try { mi = s.metaInfo ? s.metaInfo() : null; } catch (e) {}
+      if (!mi || !(mi.isTVScriptStrategy || mi.is_strategy) || typeof s.reportData !== 'function') continue;
+      var visible = null;
+      try { visible = s.properties().visible.value(); } catch (e) {}
+      var rd = _reportOf(s);
+      out.push({ s: s, name: mi.description || mi.shortDescription || null, visible: visible, rd: (rd && rd.performance) ? rd : null });
+    }
+    return out;
+  }
+  function findStrategy() {
+    var all = listStrategies();
+    var filter = ${nameFilter ? safeString(String(nameFilter).toLowerCase()) : 'null'};
+    var pool = filter ? all.filter(function(x) { return (x.name || '').toLowerCase().indexOf(filter) !== -1; }) : all;
+    var summary = all.map(function(x) { return { name: x.name, visible: x.visible, has_report: !!x.rd }; });
+    if (!pool.length) return { error: all.length
+      ? 'No strategy on the chart matches "' + filter + '". Strategies on this chart: ' + summary.map(function(x) { return x.name; }).join(', ')
+      : 'No strategy found on the chart. Add a strategy first.', strategies: summary };
+    for (var j = 0; j < pool.length; j++) if (pool[j].rd) return { strat: pool[j].s, rd: pool[j].rd, name: pool[j].name, strategies: summary };
+    var anyVisible = pool.some(function(x) { return x.visible !== false; });
+    return { strat: pool[0].s, rd: null, name: pool[0].name, strategies: summary, all_hidden: !anyVisible };
+  }
+  function iso(ms) { return (ms === null || ms === undefined || isNaN(ms) || ms <= 0) ? null : new Date(ms).toISOString(); }
+  function num(v) { return (typeof v === 'number' && isFinite(v)) ? v : null; }
+  function sub(o, k) { return (o && typeof o === 'object' && o[k] !== undefined) ? o[k] : null; }
+  function pct(v) { return (typeof v === 'number' && isFinite(v)) ? Math.round(v * 1e6) / 1e4 : null; }
+  // Initial capital isn't exposed directly. netProfit / netProfitPercent (a
+  // fraction) recovers it exactly; buyHold[0] is the fallback when there is no
+  // profit yet. Not every report carries buyHold.
+  function initialCapitalOf(rd) {
+    var a = rd.performance && rd.performance.all;
+    if (a && typeof a.netProfit === 'number' && typeof a.netProfitPercent === 'number' && a.netProfitPercent !== 0) {
+      return Math.round((a.netProfit / a.netProfitPercent) * 100) / 100;
+    }
+    return Array.isArray(rd.buyHold) && rd.buyHold.length ? rd.buyHold[0] : null;
+  }
+  function openTradeCount(rd) {
+    var a = rd.performance && rd.performance.all;
+    return a && typeof a.totalOpenTrades === 'number' ? a.totalOpenTrades : 0;
+  }
+`;
 
-export async function getStrategyResults() {
-  const ready = await ensureStrategyTesterReady();
-  const results = await evaluate(`
+// #173: some TradingView builds only compute a strategy report once the
+// Strategy Tester panel has been opened. If the chosen strategy has no report
+// yet, open the panel and poll briefly. A hidden strategy never computes, so
+// that case returns straight away with an explanation.
+async function readStrategy(nameFilter, body, maxWaitMs = 6000) {
+  const run = () => evaluate(`
     (function() {
-      ${FIND_STRATEGY_JS}
+      ${STRATEGY_JS(nameFilter)}
       try {
         var found = findStrategy();
-        if (!found) return {metrics: {}, source: 'internal_api', error: 'No strategy found on chart. Add a strategy first (e.g. indicator_add with a "... Strategy" script).'};
-        var rd = found.report;
-        if (!rd || !rd.performance) return {metrics: {}, source: 'internal_api', error: 'Strategy report not computed yet. Retry in a few seconds; if it persists, check the Strategy Tester panel is open (ui_open_panel strategy-tester) and the strategy is not hidden on the chart.'};
-        var perf = rd.performance;
-        var all = perf.all || {};
-        // Headline metrics, named to match the Strategy Tester "Key stats".
-        var metrics = {
-          net_profit: all.netProfit,
-          net_profit_percent: all.netProfitPercent,
-          gross_profit: all.grossProfit,
-          gross_loss: all.grossLoss,
-          profit_factor: all.profitFactor,
-          max_drawdown: perf.maxStrategyDrawDown,
-          max_drawdown_percent: perf.maxStrategyDrawDownPercent,
-          total_trades: (all.numberOfWiningTrades || 0) + (all.numberOfLosingTrades || 0),
-          winning_trades: all.numberOfWiningTrades,
-          losing_trades: all.numberOfLosingTrades,
-          percent_profitable: all.percentProfitable,
-          avg_trade: all.avgTrade,
-          largest_win: all.largestWinTrade,
-          largest_loss: all.largestLosTrade,
-          commission_paid: all.commissionPaid,
-          sharpe_ratio: perf.sharpeRatio,
-          sortino_ratio: perf.sortinoRatio,
-          buy_hold_return: perf.buyHoldReturn,
-          open_pl: perf.openPL
-        };
-        var clean = {};
-        for (var k in metrics) { if (metrics[k] !== null && metrics[k] !== undefined) clean[k] = metrics[k]; }
-        var currency = rd.currency || null;
-        return {metrics: clean, currency: currency, strategy: found.name, source: 'internal_api'};
-      } catch(e) { return {metrics: {}, source: 'internal_api', error: e.message}; }
+        if (found.error) return { error: found.error, strategies: found.strategies };
+        if (!found.rd) return { pending: true, all_hidden: found.all_hidden, name: found.name, strategies: found.strategies };
+        var rd = found.rd;
+        var out = (function() { ${body} })();
+        out.strategy = found.name;
+        if (found.strategies.length > 1) out.strategies = found.strategies;
+        return out;
+      } catch (e) { return { error: e.message }; }
     })()
   `);
+
+  let res = await run();
+  if (res?.pending && !res.all_hidden) {
+    await evaluate(`(function() { try { var bwb = window.TradingView && window.TradingView.bottomWidgetBar; if (bwb && typeof bwb.showWidget === 'function') bwb.showWidget('backtesting'); } catch (e) {} })()`);
+    const deadline = Date.now() + maxWaitMs;
+    while (res?.pending && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 500));
+      res = await run();
+    }
+  }
+  if (res?.pending) {
+    return {
+      error: res.all_hidden
+        ? `Strategy "${res.name}" is hidden on the chart (eye icon off), and TradingView doesn't compute reports for hidden strategies. Show it on the chart and retry.`
+        : `The report for "${res.name}" hasn't been computed yet. Retry in a few seconds.`,
+      strategy: res.name,
+      strategies: res.strategies,
+    };
+  }
+  return res;
+}
+
+export async function getStrategyResults({ strategy } = {}) {
+  const r = await readStrategy(strategy, `
+    var perf = rd.performance || {};
+    var all = perf.all || {};
+    var dr = rd.settings && rd.settings.dateRange ? rd.settings.dateRange : {};
+    var trades = Array.isArray(rd.trades) ? rd.trades.length : 0;
+    var open = openTradeCount(rd);
+    // Headline numbers. TradingView's *Percent fields are fractions (0.25 = 25%);
+    // the *_pct fields here are real percentages.
+    var metrics = {
+      net_profit: num(all.netProfit),
+      net_profit_pct: pct(all.netProfitPercent),
+      gross_profit: num(all.grossProfit),
+      gross_loss: num(all.grossLoss),
+      profit_factor: num(all.profitFactor),
+      max_drawdown: num(perf.maxStrategyDrawDown),
+      max_drawdown_pct: pct(perf.maxStrategyDrawDownPercent),
+      closed_trades: num(all.totalTrades),
+      winning_trades: num(all.numberOfWiningTrades),
+      losing_trades: num(all.numberOfLosingTrades),
+      win_rate_pct: pct(all.percentProfitable),
+      avg_trade: num(all.avgTrade),
+      avg_trade_pct: pct(all.avgTradePercent),
+      largest_win: num(all.largestWinTrade),
+      largest_loss: num(all.largestLosTrade),
+      commission_paid: num(all.commissionPaid),
+      sharpe_ratio: num(perf.sharpeRatio),
+      sortino_ratio: num(perf.sortinoRatio),
+      buy_hold_return_pct: pct(perf.buyHoldReturnPercent),
+      open_pl: num(perf.openPL),
+    };
+    for (var k in metrics) if (metrics[k] === null) delete metrics[k];
+    return {
+      currency: rd.currency != null ? rd.currency : null,
+      initial_capital: initialCapitalOf(rd),
+      date_range: {
+        backtest: { from: iso(dr.backtest && dr.backtest.from), to: iso(dr.backtest && dr.backtest.to) },
+        trade: { from: iso(dr.trade && dr.trade.from), to: iso(dr.trade && dr.trade.to) },
+      },
+      trade_count: trades,
+      open_trades: open,
+      metrics: metrics,
+      performance: perf,
+    };
+  `);
+  const error = r?.error;
   return {
-    success: Object.keys(results?.metrics || {}).length > 0,
-    metric_count: Object.keys(results?.metrics || {}).length,
-    strategy: results?.strategy, currency: results?.currency, source: results?.source,
-    metrics: results?.metrics || {},
-    ...(ready.unhidden.length && { unhidden_strategies: ready.unhidden, note: 'Strategy was hidden on the chart; it was made visible so the report could compute.' }),
-    error: results?.error,
+    success: !error,
+    source: 'internal_api',
+    strategy: r?.strategy ?? null,
+    ...(r?.strategies && { strategies: r.strategies }),
+    currency: r?.currency ?? null,
+    initial_capital: r?.initial_capital ?? null,
+    date_range: r?.date_range ?? { backtest: { from: null, to: null }, trade: { from: null, to: null } },
+    trade_count: r?.trade_count ?? 0,
+    open_trades: r?.open_trades ?? 0,
+    metric_count: r?.performance ? Object.keys(r.performance).length : 0,
+    metrics: r?.metrics ?? {},
+    performance: r?.performance ?? {},
+    ...(error && { error }),
   };
 }
 
-export async function getTrades({ max_trades } = {}) {
-  const limit = Math.min(max_trades || 20, MAX_TRADES);
-  const ready = await ensureStrategyTesterReady();
-  const trades = await evaluate(`
-    (function() {
-      ${FIND_STRATEGY_JS}
-      try {
-        var found = findStrategy();
-        if (!found) return {trades: [], source: 'internal_api', error: 'No strategy found on chart.'};
-        var strat = found.strat;
-        var orders = strat.ordersData(); if (orders && typeof orders.value === 'function') orders = orders.value();
-        if (!orders || !Array.isArray(orders)) return {trades: [], source: 'internal_api', total_orders: 0, error: 'Strategy orders not computed yet. Open the Strategy Tester panel (ui_open_panel strategy-tester) and retry.'};
-        var total = orders.length;
-        // Return the most RECENT orders (tail) — that's what a trader wants to see.
-        var start = Math.max(0, total - ${limit});
-        var result = [];
-        for (var t = start; t < total; t++) {
-          var o = orders[t];
-          if (typeof o === 'object' && o !== null) {
-            // Map TradingView's terse order keys to readable names.
-            result.push({
-              id: o.id,
-              type: o.tp,
-              side: o.b ? 'buy' : 'sell',
-              entry: o.e,
-              price: o.p,
-              qty: o.q,
-              time_index: o.tm
-            });
-          }
-        }
-        return {trades: result, total_orders: total, source: 'internal_api'};
-      } catch(e) { return {trades: [], source: 'internal_api', error: e.message}; }
-    })()
+export async function getTrades({ max_trades, strategy } = {}) {
+  const limit = Math.max(1, Math.min(Number(max_trades) || 20, MAX_TRADES));
+  const r = await readStrategy(strategy, `
+    var all = Array.isArray(rd.trades) ? rd.trades : [];
+    var open = openTradeCount(rd);
+    // Most recent trades, oldest first. The last totalOpenTrades entries are
+    // still open: their exit fields are a mark-to-market placeholder.
+    var start = Math.max(0, all.length - ${limit});
+    var result = [];
+    for (var t = start; t < all.length; t++) {
+      var tr = all[t];
+      if (!tr || typeof tr !== 'object') continue;
+      var e = tr.e || {}, x = tr.x || null;
+      var isOpen = t >= all.length - open;
+      // e.tp is the entry kind: 'le' = long entry, 'se' = short entry.
+      var side = e.tp === 'se' ? 'Short' : e.tp === 'le' ? 'Long'
+        : (String(e.c || '').toLowerCase().indexOf('short') !== -1 ? 'Short' : 'Long');
+      result.push({
+        n: t + 1,
+        side: side,
+        open: isOpen,
+        entry_time: iso(e.tm),
+        entry_price: num(e.p),
+        entry_signal: e.c != null ? String(e.c) : null,
+        entry_bar: num(e.b),
+        exit_time: x && !isOpen ? iso(x.tm) : null,
+        exit_price: x && !isOpen ? num(x.p) : null,
+        exit_signal: x && !isOpen && x.c != null ? String(x.c) : null,
+        exit_bar: x && !isOpen ? num(x.b) : null,
+        mark_price: x && isOpen ? num(x.p) : undefined,
+        qty: num(tr.q),
+        pnl: sub(tr.tp, 'v'),
+        pnl_pct: pct(sub(tr.tp, 'p')),
+        runup: sub(tr.rn, 'v'),
+        drawdown: sub(tr.dd, 'v'),
+        cum_pnl: sub(tr.cp, 'v'),
+        commission: num(tr.cm),
+        notional: num(tr.v),
+      });
+    }
+    return { trades: result, trade_count: all.length, open_trades: open };
   `);
+  const error = r?.error;
   return {
-    success: (trades?.trades?.length || 0) > 0,
-    trade_count: trades?.trades?.length || 0, total_orders: trades?.total_orders ?? 0,
-    source: trades?.source, trades: trades?.trades || [],
-    ...(ready.unhidden.length && { unhidden_strategies: ready.unhidden, note: 'Strategy was hidden on the chart; it was made visible so orders could compute.' }),
-    error: trades?.error,
+    success: !error,
+    source: 'internal_api',
+    strategy: r?.strategy ?? null,
+    ...(r?.strategies && { strategies: r.strategies }),
+    trade_count: r?.trade_count ?? 0,
+    open_trades: r?.open_trades ?? 0,
+    showing: r?.trades?.length || 0,
+    trades: r?.trades || [],
+    ...(error && { error }),
   };
 }
 
-export async function getEquity() {
-  const ready = await ensureStrategyTesterReady();
-  const equity = await evaluate(`
-    (function() {
-      ${FIND_STRATEGY_JS}
-      try {
-        var found = findStrategy();
-        if (!found) return {data: [], source: 'internal_api', error: 'No strategy found on chart.'};
-        var rd = found.report;
-        if (!rd) return {data: [], source: 'internal_api', error: 'Strategy report not computed yet. Open the Strategy Tester panel and retry.'};
-        // buyHold is the per-bar account curve; the equity curve is built from
-        // filledOrders' cumulative P&L in reportData.
-        var curve = rd.equity || rd.equityChart || null;
-        if (Array.isArray(curve)) return {data: curve, source: 'internal_api'};
-        if (Array.isArray(rd.buyHold)) {
-          return {data: [], buy_hold_points: rd.buyHold.length, source: 'internal_api',
-                  note: 'Per-bar equity curve not exposed directly; buyHold baseline has ' + rd.buyHold.length + ' points. Use data_get_strategy_results for summary P&L.'};
-        }
-        return {data: [], source: 'internal_api', note: 'Equity curve not available via API; use data_get_strategy_results.'};
-      } catch(e) { return {data: [], source: 'internal_api', error: e.message}; }
-    })()
+export async function getEquity({ strategy } = {}) {
+  const r = await readStrategy(strategy, `
+    var all = Array.isArray(rd.trades) ? rd.trades : [];
+    var cap = initialCapitalOf(rd);
+    var open = openTradeCount(rd);
+    var data = [];
+    // One point per closed trade: account equity after that trade.
+    for (var t = 0; t < all.length - open; t++) {
+      var tr = all[t];
+      if (!tr || typeof tr !== 'object') continue;
+      var cum = sub(tr.cp, 'v');
+      var when = tr.x && tr.x.tm != null ? tr.x.tm : (tr.e ? tr.e.tm : null);
+      data.push({
+        time: iso(when),
+        equity: (cap === null || cum === null) ? null : Math.round((cap + cum) * 1e8) / 1e8,
+        cum_pnl: cum,
+        drawdown: sub(tr.dd, 'v'),
+      });
+    }
+    return { data: data, initial_capital: cap, open_pl: num(rd.performance && rd.performance.openPL) };
   `);
+  const error = r?.error;
   return {
-    success: (equity?.data?.length || 0) > 0,
-    data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [],
-    buy_hold_points: equity?.buy_hold_points, note: equity?.note,
-    ...(ready.unhidden.length && { unhidden_strategies: ready.unhidden }),
-    error: equity?.error,
+    success: !error,
+    source: 'internal_api',
+    strategy: r?.strategy ?? null,
+    ...(r?.strategies && { strategies: r.strategies }),
+    initial_capital: r?.initial_capital ?? null,
+    open_pl: r?.open_pl ?? null,
+    data_points: r?.data?.length || 0,
+    data: r?.data || [],
+    ...(error && { error }),
   };
 }
+
+// Quote for any symbol through TradingView's own quote session (the feed behind
+// the watchlist), so the chart is never touched. With no symbol, the chart's
+// symbol is used and the latest bar is included (replay-aware).
+const QUOTE_FIELDS = ['last_price', 'lp_time', 'bid', 'ask', 'bid_size', 'ask_size', 'open_price', 'high_price',
+  'low_price', 'prev_close_price', 'change', 'change_percent', 'volume', 'currency_code', 'description',
+  'exchange', 'type', 'pro_name', 'current_session', 'update_mode', 'rtc', 'rch', 'rchp', 'rtc_time'];
 
 export async function getQuote({ symbol } = {}) {
-  // Serialize: chained on _quoteLock so parallel callers run one after another.
-  // Catch on the lock chain prevents a single failure from poisoning the chain.
-  const run = _quoteLock.then(() => _getQuoteInternal({ symbol }));
-  _quoteLock = run.then(() => {}, () => {});
-  return run;
-}
-
-async function _getQuoteInternal({ symbol } = {}) {
   const requested = (symbol || '').toString().trim();
-  let originalSymbol = null;
-  let needsRestore = false;
-
-  if (requested) {
-    try { originalSymbol = await evaluate(`${CHART_API}.symbol()`); } catch (e) {}
-    const bare = (s) => (s || '').toString().split(':').pop().toUpperCase();
-    if (bare(originalSymbol) !== bare(requested)) {
-      needsRestore = true;
-      await evaluateAsync(`
-        (function() {
-          var chart = ${CHART_API};
-          return new Promise(function(resolve) {
-            chart.setSymbol(${safeString(requested)}, {});
-            setTimeout(resolve, 500);
-          });
-        })()
-      `);
-      await waitForChartReady(requested);
-    }
-  }
-
-  try {
-    const data = await evaluate(`
-      (function() {
-        var api = ${CHART_API};
-        var sym = '';
-        try { sym = api.symbol(); } catch(e) {}
-        if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
-        var ext = {};
-        try { ext = api.symbolExt() || {}; } catch(e) {}
-        var bars = ${BARS_PATH};
-        var quote = { symbol: sym };
-        if (bars && typeof bars.lastIndex === 'function') {
-          var last = bars.valueAt(bars.lastIndex());
-          if (last) { quote.time = last[0]; quote.open = last[1]; quote.high = last[2]; quote.low = last[3]; quote.close = last[4]; quote.last = last[4]; quote.volume = last[5] || 0; }
-        }
+  const data = await evaluateAsync(`
+    (function() {
+      var api = ${CHART_API};
+      var chartSym = '';
+      try { chartSym = api.symbol(); } catch (e) {}
+      var sym = ${requested ? safeString(requested) : 'chartSym'};
+      var out = { symbol: sym };
+      if (!${requested ? 'true' : 'false'}) {
         try {
-          var bidEl = document.querySelector('[class*="bid"] [class*="price"], [class*="dom-"] [class*="bid"]');
-          var askEl = document.querySelector('[class*="ask"] [class*="price"], [class*="dom-"] [class*="ask"]');
-          if (bidEl) quote.bid = parseFloat(bidEl.textContent.replace(/[^0-9.\\-]/g, ''));
-          if (askEl) quote.ask = parseFloat(askEl.textContent.replace(/[^0-9.\\-]/g, ''));
-        } catch(e) {}
-        try {
-          var hdr = document.querySelector('[class*="headerRow"] [class*="last-"]');
-          if (hdr) { var hdrPrice = parseFloat(hdr.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(hdrPrice)) quote.header_price = hdrPrice; }
-        } catch(e) {}
-        if (ext.description) quote.description = ext.description;
-        if (ext.exchange) quote.exchange = ext.exchange;
-        if (ext.type) quote.type = ext.type;
-        return quote;
-      })()
-    `);
-    if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
-    return { success: true, ...data };
-  } finally {
-    if (needsRestore && originalSymbol) {
-      try {
-        await evaluateAsync(`
-          (function() {
-            var chart = ${CHART_API};
-            return new Promise(function(resolve) {
-              chart.setSymbol(${safeString(originalSymbol)}, {});
-              setTimeout(resolve, 500);
-            });
-          })()
-        `);
-        await waitForChartReady(originalSymbol);
-      } catch (e) {}
-    }
+          var bars = ${BARS_PATH};
+          var last = bars && bars.valueAt(bars.lastIndex());
+          if (last) out.bar = { time: last[0], open: last[1], high: last[2], low: last[3], close: last[4], volume: last[5] || 0 };
+        } catch (e) {}
+        try { out.replay = !!${KNOWN_PATHS.replayApi}.isReplayStarted().value(); } catch (e) {}
+      }
+      var qs = window.getQuoteSessionInstance && window.getQuoteSessionInstance('full');
+      if (!qs || typeof qs.snapshot !== 'function') { out.quote_error = 'Quote session not available in this TradingView build.'; return out; }
+      var timeout = new Promise(function(_, reject) { setTimeout(function() { reject(new Error('timeout')); }, 8000); });
+      return Promise.race([qs.snapshot(sym), timeout]).then(function(d) {
+        var keys = ${JSON.stringify(QUOTE_FIELDS)};
+        out.quote = {};
+        for (var i = 0; i < keys.length; i++) if (d && d[keys[i]] !== undefined && d[keys[i]] !== null) out.quote[keys[i]] = d[keys[i]];
+        return out;
+      }, function(e) { out.quote_error = (e && e.message) || 'unknown symbol'; return out; });
+    })()
+  `);
+
+  const q = data?.quote || {};
+  if (requested && !data?.quote) {
+    throw new Error(`No quote for "${requested}" (${data?.quote_error}). Use symbol_search to find the exact EXCHANGE:SYMBOL.`);
   }
+  // In replay the live quote is from "now", not the replay bar, so lead with the bar.
+  const useBar = !requested && data?.bar && (data.replay || q.last_price == null);
+  const result = {
+    success: true,
+    symbol: q.pro_name || data?.symbol,
+    last: useBar ? data.bar.close : (q.last_price ?? data?.bar?.close ?? null),
+    time: useBar ? data.bar.time : (q.lp_time ?? data?.bar?.time ?? null),
+    bid: q.bid, ask: q.ask, bid_size: q.bid_size, ask_size: q.ask_size,
+    open: q.open_price, high: q.high_price, low: q.low_price, prev_close: q.prev_close_price,
+    change: q.change, change_percent: q.change_percent, volume: q.volume,
+    extended_hours: q.rtc != null ? { last: q.rtc, change: q.rch, change_percent: q.rchp, time: q.rtc_time } : undefined,
+    session: q.current_session, update_mode: q.update_mode,
+    currency: q.currency_code, description: q.description, exchange: q.exchange, type: q.type,
+    ...(data?.bar && { chart_bar: data.bar }),
+    ...(data?.replay && { replay: true, note: 'Chart is in replay mode: last/time come from the replay bar; the quote fields are live.' }),
+    ...(data?.quote_error && { quote_error: data.quote_error }),
+  };
+  for (const k of Object.keys(result)) if (result[k] === undefined) delete result[k];
+  if (result.last == null) throw new Error('Could not retrieve a quote. The chart may still be loading.');
+  return result;
 }
 
 export async function getDepth() {
