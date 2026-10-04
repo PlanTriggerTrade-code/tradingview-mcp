@@ -106,6 +106,87 @@ export async function getClient() {
   return connect();
 }
 
+// Which TradingView tab is the user looking at? TradingView Desktop draws its
+// tab bar in a shell window (window/index.html); the active tab is
+// `.tabs-container .tab.active`, labelled with its layout name and symbol.
+// document.visibilityState can't be used: once a tab has been shown it keeps
+// reporting 'visible' after the user moves to another tab.
+const ACTIVE_TAB_JS = `(function() {
+  var a = document.querySelector('.tabs-container .tab.active');
+  if (!a) return null;
+  var n = a.querySelector('.layout-name'), s = a.querySelector('.symbol');
+  return { id: a.id, layout: n ? n.textContent.trim() : null, symbol: s ? s.textContent.trim() : null };
+})()`;
+export const PAGE_TAB_JS = `(function() {
+  try {
+    var api = window.TradingViewApi;
+    return { layout: api.layoutName ? api.layoutName() : null, symbol: api._activeChartWidgetWV.value().symbol() };
+  } catch (e) { return null; }
+})()`;
+
+let shell = null; // cached CDP client on the shell window
+
+async function evalOn(c, expression, label) {
+  const r = await withTimeout(c.Runtime.evaluate({ expression, returnByValue: true }), PROBE_TIMEOUT, label);
+  return r?.result?.value ?? null;
+}
+
+/** Active tab in TradingView Desktop's tab bar, or null (no tab bar / not Desktop). */
+export async function getActiveShellTab() {
+  if (shell) {
+    try { return await evalOn(shell, ACTIVE_TAB_JS, 'Shell probe'); }
+    catch { try { await shell.close(); } catch {} shell = null; }
+  }
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(HTTP_TIMEOUT) });
+  const targets = await resp.json();
+  for (const t of targets.filter(t => t.type === 'page' && /\/window\/index\.html/i.test(t.url || ''))) {
+    let c = null;
+    try {
+      c = await withTimeout(CDP({ host: CDP_HOST, port: CDP_PORT, target: t.id }), CONNECT_TIMEOUT, 'Shell attach');
+      const v = await evalOn(c, ACTIVE_TAB_JS, 'Shell probe');
+      if (v) { shell = c; return v; }
+      await c.close();
+    } catch { if (c) { try { await c.close(); } catch {} } }
+  }
+  return null;
+}
+
+const bareSymbol = (s) => String(s || '').split(':').pop().toUpperCase();
+
+// 2 = same layout and symbol, 1 = same layout, 0 = different tab
+function tabMatch(active, page) {
+  if (!active || !page || !active.layout || page.layout !== active.layout) return 0;
+  return !active.symbol || bareSymbol(active.symbol) === bareSymbol(page.symbol) ? 2 : 1;
+}
+
+async function adopt(c, target) {
+  await withTimeout(
+    Promise.all([c.Runtime.enable(), c.Page.enable(), c.DOM.enable()]),
+    CONNECT_TIMEOUT, 'CDP domain enable'
+  );
+  targetInfo = target;
+  client = c;
+  return client;
+}
+
+/**
+ * Re-attach to the user's active tab if they've switched tabs since the last
+ * call. Called once at the start of each MCP tool call (see server.js), not
+ * per evaluate(), so a multi-step tool never straddles two tabs.
+ */
+export async function followActiveTab() {
+  if (!client) return; // the first connect() already picks the active tab
+  let active, page;
+  try { active = await getActiveShellTab(); } catch { return; }
+  if (!active || !active.layout) return;
+  try { page = await evalOn(client, PAGE_TAB_JS, 'Tab probe'); } catch { return; } // getClient() handles dead clients
+  if (tabMatch(active, page) > 0) return;
+  try { await client.close(); } catch {}
+  client = null;
+  targetInfo = null;
+  await connect();
+}
+
 export async function connect(targetId = null) {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -120,7 +201,11 @@ export async function connect(targetId = null) {
       }
       // Attach to the first candidate whose renderer actually answers.
       // A crashed/frozen renderer still shows up in /json/list, so a URL
-      // match alone is not proof the page can execute anything.
+      // match alone is not proof the page can execute anything. Without an
+      // explicit target, prefer the tab that's active in TradingView's tab
+      // bar; otherwise the first responsive one.
+      const active = (!targetId && candidates.length > 1) ? await getActiveShellTab().catch(() => null) : null;
+      let best = null; // { c, target, score }
       for (const target of candidates) {
         let c = null;
         try {
@@ -132,17 +217,27 @@ export async function connect(targetId = null) {
             c.Runtime.evaluate({ expression: '1', returnByValue: true }),
             PROBE_TIMEOUT, 'Renderer probe'
           );
-          await withTimeout(
-            Promise.all([c.Runtime.enable(), c.Page.enable(), c.DOM.enable()]),
-            CONNECT_TIMEOUT, 'CDP domain enable'
-          );
-          targetInfo = target;
-          client = c;
-          return client;
+          if (!active) return await adopt(c, target);
+          const score = tabMatch(active, await evalOn(c, PAGE_TAB_JS, 'Tab probe'));
+          if (score === 2) {
+            if (best) { try { await best.c.close(); } catch {} }
+            return await adopt(c, target);
+          }
+          if (!best || score > best.score) {
+            if (best) { try { await best.c.close(); } catch {} }
+            best = { c, target, score };
+          } else {
+            await c.close();
+          }
+          c = null;
         } catch (err) {
           lastError = err;
           if (c) { try { await c.close(); } catch {} }
         }
+      }
+      if (best) {
+        try { return await adopt(best.c, best.target); }
+        catch (err) { lastError = err; try { await best.c.close(); } catch {} }
       }
       throw new Error(
         `Found ${candidates.length} TradingView target(s) but none responded — ` +
@@ -243,6 +338,10 @@ export async function disconnect() {
     try { await client.close(); } catch {}
     client = null;
     targetInfo = null;
+  }
+  if (shell) {
+    try { await shell.close(); } catch {}
+    shell = null;
   }
 }
 

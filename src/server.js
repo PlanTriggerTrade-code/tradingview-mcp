@@ -14,6 +14,7 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { followActiveTab } from './connection.js';
 
 const server = new McpServer(
   {
@@ -68,6 +69,20 @@ CONTEXT MANAGEMENT:
 - Call chart_get_state ONCE at start, reuse entity IDs`,
   }
 );
+
+// Every tool acts on the tab the user is looking at: before each call, re-attach
+// if they've switched TradingView tabs since the last one.
+const registerTool = server.tool.bind(server);
+server.tool = (...args) => {
+  const handler = args[args.length - 1];
+  if (typeof handler === 'function') {
+    args[args.length - 1] = async (...callArgs) => {
+      try { await followActiveTab(); } catch { /* the tool's own connect reports errors */ }
+      return handler(...callArgs);
+    };
+  }
+  return registerTool(...args);
+};
 
 // Register all tool groups
 registerHealthTools(server);

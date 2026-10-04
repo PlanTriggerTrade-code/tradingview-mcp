@@ -10,29 +10,66 @@
  * (Approach from issue #155 and PR #163, verified on Desktop 3.1.0.)
  */
 import CDP from 'chrome-remote-interface';
-import { getClient, reconnectTo, CDP_HOST, CDP_PORT } from '../connection.js';
+import { getClient, reconnectTo, PAGE_TAB_JS, CDP_HOST, CDP_PORT } from '../connection.js';
+
+const TAB_BAR_JS = `Array.prototype.map.call(document.querySelectorAll('.tabs-container .tab'), function(el) {
+  var n = el.querySelector('.layout-name'), s = el.querySelector('.symbol'), t = el.querySelector('.tab-title');
+  return { key: el.id, active: el.classList.contains('active'), layout: n ? n.textContent.trim() : null,
+           symbol: s ? s.textContent.trim() : null, title: (t || el).textContent.trim() };
+})`;
+
+/** Chart and new-tab page targets, each chart labelled with its layout name and symbol. */
+async function describeTargets() {
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(3000) });
+  const targets = (await resp.json())
+    .filter(t => t.type === 'page' && (/tradingview\.com\/chart/i.test(t.url) || t.title === 'New tab'));
+  return Promise.all(targets.map(async (t) => {
+    const isChart = /tradingview\.com\/chart/i.test(t.url);
+    const d = { id: t.id, url: t.url, is_chart: isChart, chart_id: t.url.match(/\/chart\/([^/?]+)/)?.[1] || null, layout: null, symbol: null };
+    if (isChart) {
+      try { const v = await withTarget(t.id, (ev) => ev(PAGE_TAB_JS)); if (v) { d.layout = v.layout; d.symbol = v.symbol; } } catch { /* unresponsive tab */ }
+    }
+    return d;
+  }));
+}
+
+const bare = (s) => String(s || '').split(':').pop().toUpperCase();
 
 /**
- * List all open chart tabs (CDP page targets).
+ * List open tabs in the order shown in TradingView's tab bar, with the active
+ * one flagged. Each tab-bar entry is matched to its page target by layout name
+ * (symbol breaks ties), since chart pages don't expose the tab bar's ids.
+ * Falls back to page-target order when there's no tab bar.
  */
 export async function list() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(3000) });
-  const targets = await resp.json();
+  const targets = await describeTargets();
+  let bar = null;
+  try { bar = await withShell((evalIn) => evalIn(TAB_BAR_JS)); } catch { /* no tab bar */ }
 
-  // Chart tabs plus new-tab landing pages (layout picker), so every tab in the
-  // top bar is listable and switchable.
-  const tabs = targets
-    .filter(t => t.type === 'page' && (/tradingview\.com\/chart/i.test(t.url) || t.title === 'New tab'))
-    .map((t, i) => ({
+  if (!bar) {
+    const tabs = targets.map((t, i) => ({ index: i, id: t.id, title: t.layout || 'New tab', layout: t.layout, symbol: t.symbol, url: t.url, chart_id: t.chart_id, is_chart: t.is_chart }));
+    return { success: true, tab_count: tabs.length, tabs, note: 'Tab bar not found; listed in page-target order.' };
+  }
+
+  const used = new Set();
+  const tabs = bar.map((b, i) => {
+    const isNew = !b.layout && /^New tab$/i.test(b.title);
+    const pool = targets.filter(t => !used.has(t.id) && (isNew ? !t.is_chart : t.is_chart && t.layout === b.layout));
+    const t = pool.find(x => bare(x.symbol) === bare(b.symbol)) || pool[0] || null;
+    if (t) used.add(t.id);
+    return {
       index: i,
-      id: t.id,
-      title: t.title.replace(/^Live stock.*charts on /, ''),
-      url: t.url,
-      chart_id: t.url.match(/\/chart\/([^/?]+)/)?.[1] || null,
-      is_chart: /tradingview\.com\/chart/i.test(t.url),
-    }));
-
-  return { success: true, tab_count: tabs.length, tabs };
+      active: b.active,
+      title: b.layout || b.title,
+      layout: b.layout,
+      symbol: t?.symbol || b.symbol,
+      id: t?.id || null,
+      chart_id: t?.chart_id || null,
+      is_chart: !isNew,
+      tab_key: b.key,
+    };
+  });
+  return { success: true, tab_count: tabs.length, active_index: tabs.findIndex(t => t.active), tabs };
 }
 
 /**
@@ -67,20 +104,6 @@ async function withShell(fn) {
     }
   }
   throw new Error('TradingView shell window (tab bar) not found. Is this TradingView Desktop with tabs?');
-}
-
-/** Check whether a CDP page target is the visible one. */
-async function isTargetVisible(targetId) {
-  let c = null;
-  try {
-    c = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
-    const { result } = await c.Runtime.evaluate({ expression: 'document.visibilityState', returnByValue: true });
-    return result?.value === 'visible';
-  } catch {
-    return false;
-  } finally {
-    try { if (c) await c.close(); } catch { /* already gone */ }
-  }
 }
 
 /** Find an open new-tab landing page target (shows the layout picker). */
@@ -279,44 +302,36 @@ export async function closeTab() {
 }
 
 /**
- * Switch to a chart tab by index (from tab_list). Clicks the corresponding
- * tab in the shell window so the switch is visible, verifies the desired
- * chart target actually became visible, then re-attaches the CDP client so
- * subsequent reads follow it.
+ * Switch to a tab by index (from tab_list, i.e. tab-bar order). Clicks the tab
+ * in the shell window, confirms the tab bar now shows it as active, then
+ * re-attaches the CDP client so subsequent reads follow it.
  */
 export async function switchTab({ index }) {
   const tabs = await list();
   const idx = Number(index);
-
-  if (idx >= tabs.tab_count) {
-    throw new Error(`Tab index ${idx} out of range (have ${tabs.tab_count} tabs)`);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= tabs.tab_count) {
+    throw new Error(`Tab index ${index} out of range (have ${tabs.tab_count} tabs, 0-${tabs.tab_count - 1})`);
   }
+  const tab = tabs.tabs[idx];
 
-  const target = tabs.tabs[idx];
-
-  if (!(await isTargetVisible(target.id))) {
-    const clicked = await withShell(async (evalIn) => {
-      const count = await evalIn(`document.querySelectorAll('.tabs-container .tab').length`);
-      // Try the same ordinal first (shell order usually matches), then the rest.
-      const order = [...new Set([Math.min(idx, count - 1), ...Array.from({ length: count }, (_, k) => k)])];
-      for (const k of order) {
-        await evalIn(`document.querySelectorAll('.tabs-container .tab')[${k}].click()`);
-        await new Promise(r => setTimeout(r, 400));
-        if (await isTargetVisible(target.id)) return k;
+  if (tab.tab_key && !tab.active) {
+    const ok = await withShell(async (evalIn) => {
+      const key = JSON.stringify(tab.tab_key);
+      const clicked = await evalIn(`(function() { var el = document.getElementById(${key}); if (!el) return false; el.click(); return true; })()`);
+      if (!clicked) return false;
+      for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 150));
+        if (await evalIn(`(function() { var el = document.getElementById(${key}); return !!(el && el.classList.contains('active')); })()`)) return true;
       }
-      return null;
+      return false;
     });
-    if (clicked === null) {
-      throw new Error(`Clicked through all shell tabs but chart ${target.chart_id} never became visible.`);
-    }
+    if (!ok) throw new Error(`Clicked tab "${tab.title}" but the tab bar did not switch to it.`);
   }
 
-  // Re-attach the cached CDP client so subsequent reads follow the switch.
-  try {
-    await reconnectTo(target.id);
-  } catch (e) {
-    throw new Error(`Tab is visible but failed to re-attach CDP to it: ${e.message}`);
+  if (tab.id) {
+    try { await reconnectTo(tab.id); }
+    catch (e) { throw new Error(`Switched to "${tab.title}" but failed to attach to it: ${e.message}`); }
   }
 
-  return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id, visually_switched: true };
+  return { success: true, action: tab.active ? 'already_active' : 'switched', index: idx, title: tab.title, symbol: tab.symbol, tab_id: tab.id, chart_id: tab.chart_id };
 }
