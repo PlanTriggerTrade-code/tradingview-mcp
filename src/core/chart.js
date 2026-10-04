@@ -165,15 +165,9 @@ export async function getVisibleRange({ _deps } = {}) {
   return { success: true, visible_range: result.visible_range, bars_range: result.bars_range };
 }
 
-export async function setVisibleRange({ from, to, _deps }) {
-  const { evaluate } = _resolve(_deps);
-  const f = requireFinite(from, 'from');
-  const t = requireFinite(to, 'to');
-
-  // Ensure enough history is loaded to cover `from`. The chart lazy-loads bars
-  // (~300 initially), so without this a multi-year range clamps to whatever is
-  // already loaded. Page back via requestMoreData until the earliest loaded bar
-  // reaches `from`, the feed runs out, or a guard trips.
+async function ensureHistoryLoaded(evaluate, from) {
+  // Chart series are lazy-loaded. Page older bars before choosing a zoom range
+  // so date navigation does not silently clamp to the currently loaded window.
   for (let i = 0; i < 25; i++) {
     const state = await evaluate(`(function() {
       var ms = ${CHART_API}._chartWidget.model().mainSeries();
@@ -181,10 +175,18 @@ export async function setVisibleRange({ from, to, _deps }) {
       var more = true; try { more = ms.requestMoreDataAvailable(); } catch (e) {}
       return { firstTime: fv && fv[0], more: more };
     })()`);
-    if (!state || state.firstTime == null || state.firstTime <= f || !state.more) break;
+    if (!state || state.firstTime == null || state.firstTime <= from || !state.more) break;
     await evaluate(`(function() { try { ${CHART_API}._chartWidget.model().mainSeries().requestMoreData(1000); } catch (e) {} })()`);
     await new Promise(r => setTimeout(r, 1800));
   }
+}
+
+export async function setVisibleRange({ from, to, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const f = requireFinite(from, 'from');
+  const t = requireFinite(to, 'to');
+
+  await ensureHistoryLoaded(evaluate, f);
 
   await evaluate(`
     (function() {
@@ -232,6 +234,8 @@ export async function scrollToDate({ date, _deps } = {}) {
   const halfWindow = 25 * secsPerBar;
   const from = timestamp - halfWindow;
   const to = timestamp + halfWindow;
+
+  await ensureHistoryLoaded(evaluate, from);
 
   await evaluate(`
     (function() {
