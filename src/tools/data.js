@@ -80,7 +80,7 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_study_values', 'Get current indicator values from the data window for all visible studies (RSI, MACD, Bollinger Bands, EMAs, custom indicators with plot()).', {}, async () => {
+  server.tool('data_get_study_values', 'Get indicator values for all visible studies (RSI, MACD, Bollinger Bands, EMAs, custom indicators with plot()). `last_bar_values` (numbers) are the LATEST bar, read from each study\'s series, with `last_bar_time` (unix s); `values` (strings) come from the data window, which follows the crosshair -- if the mouse rests on the chart they belong to the hovered bar, not the latest.', {}, async () => {
     try { return jsonResult(await core.getStudyValues()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });

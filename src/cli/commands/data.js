@@ -19,7 +19,7 @@ register('ohlcv', {
 });
 
 register('values', {
-  description: 'Get current indicator values from data window',
+  description: 'Get indicator values (last_bar_values = latest bar; values = data window, follows the crosshair)',
   handler: () => core.getStudyValues(),
 });
 

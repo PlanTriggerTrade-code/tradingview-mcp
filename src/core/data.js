@@ -493,8 +493,9 @@ export async function getDepth() {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues() {
-  const data = await evaluate(`
+export async function getStudyValues({ _deps } = {}) {
+  const run = _deps?.evaluate || evaluate;
+  const data = await run(`
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
@@ -517,6 +518,24 @@ export async function getStudyValues() {
                   var item = items[i];
                   if (item._value && item._value !== '∅' && item._title) values[item._title] = item._value;
                 }
+              }
+            }
+          } catch(e) {}
+          // The data window above follows the crosshair: with the mouse resting on
+          // the chart it shows THAT bar, not the latest one. Read the latest bar
+          // straight from the study's own series too (value[0] = bar time,
+          // value[i + 1] = metaInfo().plots[i]); titled plots only.
+          var lastBarValues = {};
+          var lastBarTime = null;
+          try {
+            var last = s.data && s.data() && s.data().last ? s.data().last() : null;
+            if (last && last.value) {
+              lastBarTime = last.value[0];
+              var plots = meta.plots || [];
+              for (var p = 0; p < plots.length; p++) {
+                var style = meta.styles && meta.styles[plots[p].id];
+                var v = last.value[p + 1];
+                if (style && style.title && typeof v === 'number' && isFinite(v)) lastBarValues[style.title] = v;
               }
             }
           } catch(e) {}
@@ -548,7 +567,10 @@ export async function getStudyValues() {
               if (Object.keys(lean).length) inputs = lean;
             }
           } catch(e) {}
-          if (Object.keys(values).length > 0) results.push({ id: id, name: name, inputs: inputs, values: values });
+          if (Object.keys(values).length > 0 || Object.keys(lastBarValues).length > 0) {
+            results.push({ id: id, name: name, inputs: inputs, values: values,
+                           last_bar_time: lastBarTime, last_bar_values: lastBarValues });
+          }
         } catch(e) {}
       }
       return results;
