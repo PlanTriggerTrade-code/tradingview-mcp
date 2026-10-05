@@ -1,13 +1,13 @@
 # TradingView MCP — Claude Instructions
 
-84 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
+87 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222). Tools act on the tab that's active in TradingView's tab bar.
 
 ## Decision Tree — Which Tool When
 
 ### "What's on my chart right now?"
 1. `chart_get_state` → symbol, timeframe, chart type, list of all indicators with entity IDs
 2. `data_get_study_values` → current numeric values from all visible indicators (RSI, MACD, BBands, EMAs, etc.)
-3. `quote_get` → real-time price, OHLC, volume for current symbol
+3. `quote_get` → real-time price, bid/ask, OHLC, volume. Pass `symbol` to quote any symbol without changing the chart
 
 ### "What levels/lines/labels are showing?"
 Custom Pine indicators draw with `line.new()`, `label.new()`, `table.new()`, `box.new()`. These are invisible to normal data tools. Use:
@@ -117,7 +117,8 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - Pine indicators must be **visible** on chart for pine graphics tools to read their data
 - `chart_manage_indicator` requires **full indicator names**: "Relative Strength Index" not "RSI", "Moving Average Exponential" not "EMA", "Bollinger Bands" not "BB"
 - Screenshots save to `screenshots/` directory with timestamps
-- OHLCV capped at 500 bars, trades at 20 per request
+- OHLCV capped at 500 bars; `data_get_trades` returns 20 by default, up to 500
+- Strategy tools take an optional `strategy` name filter when a chart has several strategies
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
 
 ## Architecture

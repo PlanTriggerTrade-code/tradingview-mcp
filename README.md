@@ -1,6 +1,7 @@
 # TradingView MCP Bridge
 
-[![MCP Toplist](https://mcptoplist.com/badge/glama%2Ftradesdontlie%2Ftradingview-mcp.svg)](https://mcptoplist.com/server/glama%2Ftradesdontlie%2Ftradingview-mcp)
+> [!NOTE]
+> **This is a maintained fork** of [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp), updated for **TradingView Desktop 3.4.x** and the **Windows Microsoft Store** build. Upstream has not merged changes since July 2026; this fork merges the important open fixes and adds its own. See [About this fork](#about-this-fork) and [CHANGELOG.md](CHANGELOG.md).
 
 Personal AI assistant for your TradingView Desktop charts. Connects Claude Code to your locally running TradingView app via Chrome DevTools Protocol for AI-assisted chart analysis, Pine Script development, and workflow automation.
 
@@ -15,6 +16,23 @@ Personal AI assistant for your TradingView Desktop charts. Connects Claude Code 
 
 > [!CAUTION]
 > This tool accesses undocumented internal TradingView APIs via the Electron debug interface. These can change or break without notice in any TradingView update. Pin your TradingView Desktop version if stability matters to you.
+
+## About this fork
+
+Tested against TradingView Desktop **3.4.1** (Windows, Microsoft Store build). Highlights:
+
+- **Windows Store build works out of the box.** TradingView for Windows now ships only through the Microsoft Store, and Store apps can't be started with command-line flags the usual way. This fork starts it through Windows' app-activation API, which passes the debug-port flag and keeps your normal login. Run `scripts\create_shortcut.ps1` once to get a **TradingView (CDP)** shortcut.
+- **Follows the tab you're looking at.** Tools act on the active TradingView tab, even after you switch tabs. `tab_list` / `tab_switch` match the tab bar.
+- **`quote_get` for any symbol** from TradingView's quote feed, with bid/ask and previous close, without switching your chart.
+- **Strategy tools that read the right strategy**, including when the chart has hidden copies. Full trade list with long/short, open trades flagged, exact initial capital, correctly scaled percentages.
+- **Pine tools fixed for 3.4**: they find the on-screen editor, detect the icon-only "Add to chart" button, and refuse to overwrite unsaved or saved scripts by accident.
+- **`tv_launch` never kills a working session**, and every CDP call has a timeout so a hung TradingView can't freeze your AI client.
+- **Safer**: no self-update tool or GitHub phone-home, injection-safe tool inputs, `"false"` no longer read as true (that used to delete all alerts), 0 npm audit findings.
+- **`morning_brief`** watchlist scan from [LewisWJackson/tradingview-mcp-jackson](https://github.com/LewisWJackson/tradingview-mcp-jackson), with its path checks fixed for Windows.
+
+### The debug port, in one paragraph
+
+The server talks to TradingView Desktop over its Chrome DevTools debug port (9222), which is **off by default**. TradingView must be **fully closed** (including the system-tray icon) and then started with `--remote-debugging-port=9222`; a normal restart closes the port again. Use the launchers below, the **TradingView (CDP)** shortcut, or just ask your assistant to run `tv_launch`. Check it with http://127.0.0.1:9222/json/version. While the port is open, any program on your computer can control TradingView (it only listens on 127.0.0.1); close TradingView when you're done on a shared machine.
 
 ## How It Works (and why it's safe to run)
 
@@ -83,9 +101,9 @@ Or follow the manual steps below.
 ### 1. Install
 
 ```bash
-git clone https://github.com/tradesdontlie/tradingview-mcp.git
+git clone https://github.com/PlanTriggerTrade-code/tradingview-mcp.git
 cd tradingview-mcp
-npm install
+npm ci
 ```
 
 ### 2. Launch TradingView with CDP
@@ -97,10 +115,15 @@ TradingView Desktop must be running with Chrome DevTools Protocol enabled on por
 ./scripts/launch_tv_debug_mac.sh
 ```
 
-**Windows:**
+**Windows** (Microsoft Store or installer build): make a one-time **TradingView (CDP)** shortcut on your Desktop and Start Menu, and always start TradingView from it:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1
+```
+Or run a launcher directly:
 ```bash
 scripts\launch_tv_debug.bat
 ```
+Both detect the Store build and start it through COM app activation (`scripts\launch_tv_debug_store.ps1`): Store apps can't be started from their install folder, and Start-menu launches drop the flag. No admin rights needed.
 
 **Linux:**
 ```bash
@@ -217,7 +240,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (78 MCP tools)
+## Tool Reference (87 MCP tools)
 
 ### Chart Reading
 
@@ -353,12 +376,16 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
 ```
 
-- **Transport**: MCP over stdio (84 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
+- **Transport**: MCP over stdio (87 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
 - **Connection**: Chrome DevTools Protocol on localhost:9222
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
 
 ## Attributions
+
+- Original project: [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp) (MIT).
+- `morning_brief`, `session_save`, `session_get` and `rules.example.json`: [LewisWJackson/tradingview-mcp-jackson](https://github.com/LewisWJackson/tradingview-mcp-jackson) (MIT).
+- Merged upstream pull requests are listed in [CHANGELOG.md](CHANGELOG.md).
 
 This project is not affiliated with, endorsed by, or associated with:
 - **TradingView Inc.** — TradingView is a trademark of TradingView Inc.
