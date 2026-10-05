@@ -19,11 +19,12 @@ export function registerHealthTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('tv_launch', 'Launch TradingView Desktop with Chrome DevTools Protocol (remote debugging) enabled. Auto-detects install location on Mac, Windows, and Linux, including Windows MSIX/Store installs. If a Store install blocks the debug port, automatically relaunches from a local package copy (result then includes msix_local_copy: true; the first fallback launch copies ~330MB one time, so it can take a minute).', {
+  server.tool('tv_launch', 'Start TradingView Desktop with the debug port (CDP) open. Does nothing if the port is already open. Finds the app on Mac, Windows and Linux; on Windows the Microsoft Store build is started through COM app activation, which keeps the normal profile and login.', {
     port: z.coerce.number().optional().describe('CDP port (default 9222)'),
-    kill_existing: booleanParam().optional().describe('Kill existing TradingView instances first (default true)'),
-  }, async ({ port, kill_existing }) => {
-    try { return jsonResult(await core.launch({ port, kill_existing })); }
+    kill_existing: booleanParam().optional().describe('Close a TradingView that is running without the debug port first (default true)'),
+    allow_local_copy: booleanParam().optional().describe('Windows Store build only, last resort: if the debug port still will not open, run TradingView from a copy of the package in %LOCALAPPDATA% (~330MB once per version; may start signed out). Default false.'),
+  }, async ({ port, kill_existing, allow_local_copy }) => {
+    try { return jsonResult(await core.launch({ port, kill_existing, allow_local_copy })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

@@ -3,8 +3,11 @@
  */
 import { getClient, getTargetInfo, evaluate, CDP_HOST, CDP_PORT } from '../connection.js';
 import { existsSync, cpSync, rmSync, readdirSync } from 'fs';
-import { execSync, execFileSync, spawn } from 'child_process';
+import { execSync, execFileSync, spawn, spawnSync } from 'child_process';
 import { dirname, basename, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const STORE_LAUNCHER = fileURLToPath(new URL('../../scripts/launch_tv_debug_store.ps1', import.meta.url));
 
 export async function healthCheck() {
   await getClient();
@@ -160,8 +163,6 @@ export async function uiState() {
   return { success: true, ...state };
 }
 
-const WINDOWS_APPS_RE = /\\WindowsApps\\/i;
-
 function _resolveLaunchDeps(deps) {
   return {
     spawn: deps?.spawn || spawn,
@@ -173,7 +174,34 @@ function _resolveLaunchDeps(deps) {
     readdirSync: deps?.readdirSync || readdirSync,
     delay: deps?.delay || ((ms) => new Promise((r) => setTimeout(r, ms))),
     probeCdp: deps?.probeCdp || _probeCdp,
+    runStoreLauncher: deps?.runStoreLauncher || _runStoreLauncher,
   };
+}
+
+// An MCP host built on Electron (VS Code, some desktop apps) can leak
+// ELECTRON_RUN_AS_NODE into our environment; TradingView (also Electron) then
+// starts as plain Node and exits immediately.
+function _launchEnv() {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
+}
+
+/**
+ * Launch the Microsoft Store (MSIX) build through scripts/launch_tv_debug_store.ps1,
+ * which activates the app via Windows' IApplicationActivationManager COM API.
+ * Store apps can't be spawned directly (WindowsApps is ACL-protected, EACCES /
+ * EPERM) and Start-menu launches drop command-line flags; COM activation passes
+ * --remote-debugging-port through and keeps the user's normal profile and login.
+ * Script exit codes: 0 ready, 1 not installed, 2 port never opened,
+ * 3 running without the port (NoKill), 4 activation failed. -1: script missing.
+ */
+function _runStoreLauncher({ cdpPort, killFirst }) {
+  if (!existsSync(STORE_LAUNCHER)) return { code: -1, output: 'store launcher script not found' };
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', STORE_LAUNCHER, '-Port', String(cdpPort)];
+  if (!killFirst) args.push('-NoKill');
+  const res = spawnSync('powershell.exe', args, { timeout: 90000, encoding: 'utf8', windowsHide: true, env: _launchEnv() });
+  return { code: res.status ?? -1, output: `${res.stdout || ''}${res.stderr || ''}`.trim() || res.error?.message || '' };
 }
 
 async function _probeCdp(cdpPort) {
@@ -190,7 +218,14 @@ async function _probeCdp(cdpPort) {
 }
 
 function _spawnDetached(spawnFn, exe, args) {
-  const child = spawnFn(exe, args, { detached: true, stdio: 'ignore' });
+  let child;
+  try {
+    child = spawnFn(exe, args, { detached: true, stdio: 'ignore', env: _launchEnv() });
+  } catch (e) {
+    // Some failures (EPERM on WindowsApps) throw synchronously instead of
+    // emitting 'error'; surface them the same way.
+    return { pid: null, syncError: e.code || e.message || 'spawn error', on() {}, off() {}, unref() {} };
+  }
   child.unref();
   return child;
 }
@@ -198,6 +233,7 @@ function _spawnDetached(spawnFn, exe, args) {
 // Resolves once with an error string if the process fails/exits within graceMs,
 // or with null if it survives that long.
 function _spawnFailedEarly(child, graceMs = 1500) {
+  if (child.syncError) return Promise.resolve(child.syncError);
   return new Promise((resolve) => {
     const timer = setTimeout(() => { cleanup(); resolve(null); }, graceMs);
     const onError = (e) => { cleanup(); resolve(e.code || e.message || 'spawn error'); };
@@ -245,11 +281,24 @@ function _copyMsixPackageLocal(tvPath, { cpSync, rmSync, readdirSync, existsSync
   return dstExe;
 }
 
-export async function launch({ port, kill_existing, _deps } = {}) {
+export async function launch({ port, kill_existing, allow_local_copy, _deps } = {}) {
   const deps = _resolveLaunchDeps(_deps);
   const cdpPort = port || CDP_PORT;
   const killFirst = kill_existing !== false;
+  const allowLocalCopy = allow_local_copy === true || process.env.TV_MSIX_LOCAL_COPY === '1';
   const platform = process.platform;
+
+  // #542: if TradingView is already serving the debug port, there's nothing to
+  // do. Killing it would only throw away the user's session.
+  const existing = await deps.probeCdp(cdpPort);
+  if (existing) {
+    let info = {};
+    try { info = JSON.parse(existing); } catch { /* not JSON */ }
+    return {
+      success: true, already_running: true, platform, cdp_port: cdpPort,
+      cdp_url: `http://${CDP_HOST}:${cdpPort}`, browser: info.Browser, user_agent: info['User-Agent'],
+    };
+  }
 
   const pathMap = {
     darwin: [
@@ -276,17 +325,43 @@ export async function launch({ port, kill_existing, _deps } = {}) {
     if (p && deps.existsSync(p)) { tvPath = p; break; }
   }
 
+  let msixExe = null;
   if (!tvPath && platform === 'win32') {
-    // MSIX/Windows Store install — InstallLocation is in WindowsApps, which is ACL-restricted
-    // for normal `dir` enumeration but readable via Get-AppxPackage without elevation.
-    try {
-      const ps = 'powershell -NoProfile -Command "(Get-AppxPackage -Name \'TradingView.Desktop\' -ErrorAction SilentlyContinue).InstallLocation"';
-      const installDir = deps.execSync(ps, { timeout: 5000 }).toString().trim();
-      if (installDir) {
-        const candidate = `${installDir}\\TradingView.exe`;
-        if (deps.existsSync(candidate)) tvPath = candidate;
+    // Microsoft Store (MSIX) install, the only Windows distribution of current
+    // TradingView Desktop builds. Launch through COM activation first.
+    const store = await deps.runStoreLauncher({ cdpPort, killFirst });
+    if (store.code === 0) {
+      const ready = await deps.probeCdp(cdpPort);
+      let info = {};
+      try { info = JSON.parse(ready); } catch { /* still a success: the script saw the port */ }
+      return {
+        success: true, platform, binary: 'Microsoft Store (MSIX) TradingView', launch_method: 'com_activation',
+        cdp_port: cdpPort, cdp_url: `http://${CDP_HOST}:${cdpPort}`, browser: info.Browser, user_agent: info['User-Agent'],
+      };
+    }
+    if (store.code === 3) {
+      throw new Error('TradingView is running without the debug port. Close it, or call tv_launch with kill_existing: true (the default).');
+    }
+    if (store.code !== 1) {
+      // Installed, but COM activation didn't produce a debug port (reported on
+      // some builds, #42/#75/#128), or the launcher script is missing.
+      if (!allowLocalCopy) {
+        throw new Error(
+          `Couldn't open the debug port on the Microsoft Store build (launcher exit ${store.code}: ${String(store.output).split('\n').pop()}). ` +
+          'Retry with allow_local_copy: true to run TradingView from a copy of the package in %LOCALAPPDATA% ' +
+          '(copies ~330MB once per version; the copy may start signed out, since Store apps keep their profile inside the package container).'
+        );
       }
-    } catch { /* ignore */ }
+      // WindowsApps is ACL-restricted for enumeration, but Get-AppxPackage
+      // reads InstallLocation without elevation.
+      try {
+        const ps = 'powershell -NoProfile -Command "(Get-AppxPackage -Name \'TradingView.Desktop\' -ErrorAction SilentlyContinue).InstallLocation"';
+        const installDir = deps.execSync(ps, { timeout: 5000 }).toString().trim();
+        if (installDir && deps.existsSync(`${installDir}\\TradingView.exe`)) msixExe = `${installDir}\\TradingView.exe`;
+      } catch { /* ignore */ }
+      if (!msixExe) throw new Error('Microsoft Store TradingView install location not found (Get-AppxPackage).');
+      tvPath = msixExe;
+    }
   }
 
   if (!tvPath) {
@@ -323,7 +398,16 @@ export async function launch({ port, kill_existing, _deps } = {}) {
 
   const cdpArgs = [`--remote-debugging-port=${cdpPort}`];
   let child;
-  if (platform === 'darwin' && tvPath.includes('.app/')) {
+  let info = null;
+  let usedLocalCopy = false;
+  if (msixExe) {
+    // Opt-in fallback: run the same files from a plain directory outside
+    // WindowsApps (see _copyMsixPackageLocal).
+    tvPath = _copyMsixPackageLocal(msixExe, deps);
+    await killExisting();
+    usedLocalCopy = true;
+    child = _spawnDetached(deps.spawn, tvPath, cdpArgs);
+  } else if (platform === 'darwin' && tvPath.includes('.app/')) {
     // Launch through `open` so launchd starts the app at normal foreground
     // QoS. A direct spawn() inherits this process's priority — when the MCP
     // runs under a background scheduler (launchd agent, cron), TradingView
@@ -336,24 +420,10 @@ export async function launch({ port, kill_existing, _deps } = {}) {
   } else {
     child = _spawnDetached(deps.spawn, tvPath, cdpArgs);
   }
-  let info = null;
-  let usedLocalCopy = false;
-
-  if (platform === 'win32' && WINDOWS_APPS_RE.test(tvPath)) {
-    const earlyFailure = await _spawnFailedEarly(child);
-    if (!earlyFailure) {
-      info = await _waitForCdp({ cdpPort, attempts: 15, delay: deps.delay, probeCdp: deps.probeCdp });
-    }
-    if (!info) {
-      // Direct WindowsApps launch was blocked or CDP never bound — fall back to
-      // a local copy of the package (see _copyMsixPackageLocal).
-      const localExe = _copyMsixPackageLocal(tvPath, deps);
-      await killExisting();
-      child = _spawnDetached(deps.spawn, localExe, cdpArgs);
-      tvPath = localExe;
-      usedLocalCopy = true;
-    }
-  }
+  // Listen for an early 'error'/'exit' (an unhandled 'error' event would crash
+  // the server) and fail fast instead of polling a port that will never open.
+  const earlyFailure = typeof child.on === 'function' ? await _spawnFailedEarly(child) : null;
+  if (earlyFailure) throw new Error(`Failed to start ${tvPath}: ${earlyFailure}`);
 
   if (!info) {
     info = await _waitForCdp({ cdpPort, attempts: 15, delay: deps.delay, probeCdp: deps.probeCdp });
