@@ -16,10 +16,16 @@ register('pine', {
       description: 'Get current Pine Script source from editor',
       handler: () => core.getSource(),
     }],
+    ['state', {
+      description: 'Which script the editor is bound to, and whether it has unsaved changes',
+      handler: () => core.getEditorState(),
+    }],
     ['set', {
-      description: 'Set Pine Script source (reads stdin or --file)',
+      description: 'Set Pine Script source (reads stdin or --file). Refuses to clobber unsaved work or a saved script unless --target/--force',
       options: {
         file: { type: 'string', short: 'f', description: 'Read source from file' },
+        target: { type: 'string', short: 't', description: 'Name of the saved script you intend to overwrite (must match the editor title)' },
+        force: { type: 'boolean', description: 'Bypass the unsaved-changes / saved-script guards' },
       },
       handler: async (opts) => {
         let source;
@@ -29,7 +35,7 @@ register('pine', {
           source = await readStdin();
         }
         if (!source) throw new Error('No source provided. Pipe source via stdin or use --file.');
-        return core.setSource({ source });
+        return core.setSource({ source, target: opts.target, force: opts.force });
       },
     }],
     ['compile', {
@@ -73,21 +79,30 @@ register('pine', {
       },
     }],
     ['save', {
-      description: 'Save the current Pine Script (Ctrl+S)',
-      handler: () => core.save(),
+      description: 'Save the current Pine Script via the editor menu (handles the name dialog for untitled scripts)',
+      options: {
+        name: { type: 'string', short: 'n', description: 'Name for an untitled script when the Save dialog appears' },
+      },
+      handler: (opts) => core.save({ name: opts.name }),
     }],
     ['new', {
-      description: 'Create a new blank Pine Script (indicator, strategy, library)',
+      description: 'Create a genuinely new Pine Script via the editor menu (indicator, strategy, library)',
+      options: {
+        force: { type: 'boolean', description: 'Proceed even if the current buffer has unsaved changes' },
+      },
       handler: (opts, positionals) => {
         const type = positionals[0] || 'indicator';
-        return core.newScript({ type });
+        return core.newScript({ type, force: opts.force });
       },
     }],
     ['open', {
-      description: 'Open a saved Pine Script by name',
+      description: 'Open a saved Pine Script by name via the editor Open dialog (rebinds the editor)',
+      options: {
+        force: { type: 'boolean', description: 'Proceed even if the current buffer has unsaved changes' },
+      },
       handler: (opts, positionals) => {
         if (!positionals[0]) throw new Error('Script name required. Usage: tv pine open "My Script"');
-        return core.openScript({ name: positionals.join(' ') });
+        return core.openScript({ name: positionals.join(' '), force: opts.force });
       },
     }],
     ['list', {

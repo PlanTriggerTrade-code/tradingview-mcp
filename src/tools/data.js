@@ -1,11 +1,12 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
+import { booleanParam } from './_schema.js';
 import * as core from '../core/data.js';
 
 export function registerDataTools(server) {
   server.tool('data_get_ohlcv', 'Get OHLCV bar data from the chart. Use summary=true for compact stats instead of all bars (saves context).', {
     count: z.coerce.number().optional().describe('Number of bars to retrieve (max 500, default 100)'),
-    summary: z.coerce.boolean().optional().describe('Return summary stats (high, low, open, close, avg volume, range) instead of all bars — much smaller output'),
+    summary: booleanParam().optional().describe('Return summary stats (high, low, open, close, avg volume, range) instead of all bars — much smaller output'),
   }, async ({ count, summary }) => {
     try { return jsonResult(await core.getOhlcv({ count, summary })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
@@ -18,25 +19,32 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_strategy_results', 'Get strategy performance metrics from Strategy Tester. Auto-opens the panel and auto-unhides a hidden strategy (TradingView never computes reports for hidden strategies); result includes unhidden_strategies when that happened.', {}, async () => {
-    try { return jsonResult(await core.getStrategyResults()); }
+  const strategyParam = z.string().optional().describe('Strategy name (substring, case-insensitive) when the chart has more than one. Default: the first strategy with a computed report.');
+
+  server.tool('data_get_strategy_results', 'Get Strategy Tester results: `metrics` (headline numbers; *_pct fields are percentages), the full raw `performance` object, currency, initial_capital, date_range, trade_count and open_trades. Picks the strategy whose report is computed; never unhides anything. Hidden strategies have no report.', {
+    strategy: strategyParam,
+  }, async ({ strategy }) => {
+    try { return jsonResult(await core.getStrategyResults({ strategy })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_trades', 'Get trade list from Strategy Tester. Auto-opens the panel and auto-unhides a hidden strategy.', {
-    max_trades: z.coerce.number().optional().describe('Maximum trades to return'),
-  }, async ({ max_trades }) => {
-    try { return jsonResult(await core.getTrades({ max_trades })); }
+  server.tool('data_get_trades', 'Get the Strategy Tester trade list: the most recent trades (oldest first) with side, entry/exit, P&L, run-up, drawdown and cumulative P&L. Open trades are flagged open:true with a mark_price instead of exit fields.', {
+    max_trades: z.coerce.number().optional().describe('Maximum trades to return (default 20, max 500)'),
+    strategy: strategyParam,
+  }, async ({ max_trades, strategy }) => {
+    try { return jsonResult(await core.getTrades({ max_trades, strategy })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_equity', 'Get equity curve data from Strategy Tester', {}, async () => {
-    try { return jsonResult(await core.getEquity()); }
+  server.tool('data_get_equity', 'Get the strategy equity curve: account equity after each closed trade (initial capital + cumulative P&L), plus open P&L.', {
+    strategy: strategyParam,
+  }, async ({ strategy }) => {
+    try { return jsonResult(await core.getEquity({ strategy })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('quote_get', 'Get real-time quote data for a symbol (price, OHLC, volume). If symbol is provided and differs from the current chart, the chart is briefly switched to fetch the quote and then restored — adds ~1-2s and serializes parallel calls.', {
-    symbol: z.string().optional().describe('Symbol to quote (blank = current chart symbol). Non-blank values cause a chart switch + restore.'),
+  server.tool('quote_get', 'Get a real-time quote (last, bid/ask, OHLC, previous close, change, volume, session) for any symbol, from the TradingView quote feed. Does not touch the chart. Blank symbol = the chart symbol, plus its latest bar (replay-aware).', {
+    symbol: z.string().optional().describe('Symbol to quote, ideally EXCHANGE:SYMBOL (e.g. "NASDAQ:AAPL", "CME_MINI:ES1!"). Blank = current chart symbol.'),
   }, async ({ symbol }) => {
     try { return jsonResult(await core.getQuote({ symbol })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
@@ -49,7 +57,7 @@ export function registerDataTools(server) {
 
   server.tool('data_get_pine_lines', 'Read horizontal price levels drawn by Pine Script indicators (line.new). Returns deduplicated price levels per study. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name (e.g., "Profiler", "NY Levels"). Omit for all.'),
-    verbose: z.coerce.boolean().optional().describe('Return raw line data with IDs, coordinates, colors (default false — returns only unique price levels)'),
+    verbose: booleanParam().optional().describe('Return raw line data with IDs, coordinates, colors (default false — returns only unique price levels)'),
   }, async ({ study_filter, verbose }) => {
     try { return jsonResult(await core.getPineLines({ study_filter, verbose })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
@@ -58,7 +66,7 @@ export function registerDataTools(server) {
   server.tool('data_get_pine_labels', 'Read text labels drawn by Pine Script indicators (label.new). Returns text and price pairs. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
     max_labels: z.coerce.number().optional().describe('Max labels per study (default 50). Set higher if you need all.'),
-    verbose: z.coerce.boolean().optional().describe('Return raw label data with IDs, colors, positions (default false — returns only text + price)'),
+    verbose: booleanParam().optional().describe('Return raw label data with IDs, colors, positions (default false — returns only text + price)'),
   }, async ({ study_filter, max_labels, verbose }) => {
     try { return jsonResult(await core.getPineLabels({ study_filter, max_labels, verbose })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
@@ -73,13 +81,13 @@ export function registerDataTools(server) {
 
   server.tool('data_get_pine_boxes', 'Read box/zone boundaries drawn by Pine Script indicators (box.new). Returns deduplicated {high, low} price zones. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
-    verbose: z.coerce.boolean().optional().describe('Return all boxes with IDs and coordinates (default false — returns unique price zones)'),
+    verbose: booleanParam().optional().describe('Return all boxes with IDs and coordinates (default false — returns unique price zones)'),
   }, async ({ study_filter, verbose }) => {
     try { return jsonResult(await core.getPineBoxes({ study_filter, verbose })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_study_values', 'Get current indicator values from the data window for all visible studies (RSI, MACD, Bollinger Bands, EMAs, custom indicators with plot()).', {}, async () => {
+  server.tool('data_get_study_values', 'Get indicator values for all visible studies (RSI, MACD, Bollinger Bands, EMAs, custom indicators with plot()). `last_bar_values` (numbers) are the LATEST bar, read from each study\'s series, with `last_bar_time` (unix s); `values` (strings) come from the data window, which follows the crosshair -- if the mouse rests on the chart they belong to the hovered bar, not the latest.', {}, async () => {
     try { return jsonResult(await core.getStudyValues()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });

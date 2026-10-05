@@ -6,7 +6,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { setVisibleRange } from '../src/core/chart.js';
+import { scrollToDate, setVisibleRange } from '../src/core/chart.js';
 
 // Stateful mock: a probe reports the earliest loaded bar (`current`); each
 // requestMoreData(1000) page pushes that earliest bar back by `step`.
@@ -50,5 +50,23 @@ describe('setVisibleRange() — history paging', () => {
     assert.ok(evaluate.calls.some((c) => c.includes('zoomToBarsRange')));
     assert.deepEqual(res.requested, { from: 1000, to: 2000 });
     assert.deepEqual(res.actual, { from: 11, to: 22 });
+  });
+});
+
+describe('scrollToDate() — history paging', () => {
+  it('pages older bars before zooming to a date outside the loaded window', async () => {
+    const calls = [];
+    let firstTime = 5000;
+    const evaluate = async (expr) => {
+      calls.push(expr);
+      if (expr.endsWith('.resolution()')) return 'D';
+      if (expr.includes('requestMoreDataAvailable')) return { firstTime, more: firstTime > 1000 };
+      if (expr.includes('requestMoreData(1000)')) { firstTime -= 2000; return undefined; }
+      return undefined;
+    };
+    const result = await scrollToDate({ date: '1970-01-01', _deps: { evaluate } });
+    assert.equal(result.success, true);
+    assert.equal(calls.filter((c) => c.includes('requestMoreData(1000)')).length, 2);
+    assert.ok(calls.some((c) => c.includes('zoomToBarsRange')));
   });
 });

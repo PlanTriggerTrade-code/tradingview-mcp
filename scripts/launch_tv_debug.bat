@@ -5,10 +5,14 @@ REM Usage: scripts\launch_tv_debug.bat [port]
 set PORT=%1
 if "%PORT%"=="" set PORT=9222
 
-REM Kill existing TradingView instances
 REM (ping -n is used for waits throughout: timeout /t aborts when stdin is redirected)
-taskkill /F /IM TradingView.exe >nul 2>&1
-ping -n 3 127.0.0.1 >nul
+
+REM Already serving the debug port? Then there's nothing to do.
+curl -s http://127.0.0.1:%PORT%/json/version >nul 2>&1
+if %errorlevel% equ 0 (
+    echo Debug port already open at http://127.0.0.1:%PORT%
+    exit /b 0
+)
 
 REM Auto-detect TradingView install location
 set "TV_EXE="
@@ -18,16 +22,15 @@ if exist "%LOCALAPPDATA%\TradingView\TradingView.exe" set "TV_EXE=%LOCALAPPDATA%
 if exist "%PROGRAMFILES%\TradingView\TradingView.exe" set "TV_EXE=%PROGRAMFILES%\TradingView\TradingView.exe"
 if exist "%PROGRAMFILES(x86)%\TradingView\TradingView.exe" set "TV_EXE=%PROGRAMFILES(x86)%\TradingView\TradingView.exe"
 
-REM Check MSIX / Windows Store installs.
-REM Get-AppxPackage resolves the install without elevation; enumerating
-REM %PROGRAMFILES%\WindowsApps with dir requires admin rights, so keep it as a fallback.
+REM Not found: assume the Microsoft Store (MSIX) build, the only Windows
+REM distribution of current TradingView Desktop. Store apps can't be started
+REM directly from WindowsApps (access denied) and Start-menu launches drop
+REM command-line flags, so hand off to the COM-activation launcher, which
+REM passes --remote-debugging-port through and keeps the normal login.
 if "%TV_EXE%"=="" (
-    for /f "usebackq tokens=*" %%i in (`powershell -NoProfile -Command "(Get-AppxPackage -Name 'TradingView.Desktop' -ErrorAction SilentlyContinue).InstallLocation" 2^>nul`) do (
-        if exist "%%i\TradingView.exe" set "TV_EXE=%%i\TradingView.exe"
-    )
-)
-if "%TV_EXE%"=="" (
-    for /f "tokens=*" %%i in ('dir /s /b "%PROGRAMFILES%\WindowsApps\TradingView*\TradingView.exe" 2^>nul') do set "TV_EXE=%%i"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch_tv_debug_store.ps1" -Port %PORT%
+    if not errorlevel 1 exit /b 0
+    if errorlevel 2 exit /b 1
 )
 if "%TV_EXE%"=="" (
     for /f "tokens=*" %%i in ('where TradingView.exe 2^>nul') do set "TV_EXE=%%i"
@@ -35,16 +38,31 @@ if "%TV_EXE%"=="" (
 
 if "%TV_EXE%"=="" (
     echo Error: TradingView not found.
-    echo Checked: %%LOCALAPPDATA%%\TradingView, %%PROGRAMFILES%%\TradingView, WindowsApps
+    echo Checked: %%LOCALAPPDATA%%\TradingView, %%PROGRAMFILES%%\TradingView, Microsoft Store
     echo.
     echo If installed elsewhere, run manually:
     echo   "C:\path\to\TradingView.exe" --remote-debugging-port=%PORT%
     exit /b 1
 )
 
+REM Close a TradingView that's running without the port (the flag is ignored otherwise)
+taskkill /F /IM TradingView.exe >nul 2>&1
+ping -n 3 127.0.0.1 >nul
+
 echo Found TradingView at: %TV_EXE%
 echo Starting with --remote-debugging-port=%PORT%...
-start "" "%TV_EXE%" --remote-debugging-port=%PORT%
+REM Launch via Start-Process, not `start`. TradingView outlives this script, and
+REM `start` hands it our inherited std handles, so a caller that captures our
+REM output (an agent, a CI step, `| tee`) never sees the pipe reach EOF and hangs
+REM until TradingView is closed — even though the script itself already finished.
+REM Redirecting the `start` line does not help: cmd applies the redirection to
+REM the `start` builtin, and the child still gets the handles. Start-Process
+REM creates a genuinely independent process, so the pipe closes with us.
+powershell -NoProfile -Command "Start-Process -FilePath '%TV_EXE%' -ArgumentList '--remote-debugging-port=%PORT%'"
+if errorlevel 1 (
+    echo Error: failed to launch TradingView.
+    exit /b 1
+)
 
 echo Waiting for CDP to become available...
 ping -n 6 127.0.0.1 >nul
@@ -59,8 +77,7 @@ set /a TRIES+=1
 if %TRIES% geq 30 (
     echo.
     echo Error: TradingView is running but CDP never became available on port %PORT%.
-    echo Some Windows MSIX builds block the debug port. Use the tv_launch MCP tool,
-    echo which falls back to launching from a local copy of the package.
+    echo Close TradingView completely, including the system tray icon, and try again.
     exit /b 1
 )
 echo Still waiting...

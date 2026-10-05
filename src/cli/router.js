@@ -132,19 +132,28 @@ async function execute(handler, values, positionals) {
   try {
     const result = await handler(values, positionals);
     console.log(JSON.stringify(result, null, 2));
-    process.exit(0);
+    await finish(0);
   } catch (err) {
     handleError(err);
   }
 }
 
+// Let the process end on its own instead of process.exit(): on Windows, Node 24
+// aborts with a libuv assertion (UV_HANDLE_CLOSING) when process.exit() runs while a
+// fetch() socket is still closing. Close the CDP socket so the event loop can drain;
+// the unref'd timer only fires if something else keeps the process alive.
+async function finish(code) {
+  process.exitCode = code;
+  try {
+    const { disconnect } = await import('../connection.js');
+    await disconnect();
+  } catch { /* not connected */ }
+  setTimeout(() => process.exit(code), 1500).unref();
+}
+
 function handleError(err) {
   const message = err.message || String(err);
-  // Connection failures get exit code 2
-  if (/CDP|connection|ECONNREFUSED|not running/i.test(message)) {
-    console.error(JSON.stringify({ success: false, error: message }, null, 2));
-    process.exit(2);
-  }
   console.error(JSON.stringify({ success: false, error: message }, null, 2));
-  process.exit(1);
+  // Connection failures get exit code 2
+  return finish(/CDP|connection|ECONNREFUSED|not running/i.test(message) ? 2 : 1);
 }

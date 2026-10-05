@@ -14,22 +14,24 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { registerMorningTools } from './tools/morning.js';
+import { followActiveTab } from './connection.js';
 
 const server = new McpServer(
   {
     name: 'tradingview',
-    version: '2.0.0',
+    version: '2.1.0',
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-    instructions: `TradingView MCP — 84 tools for reading and controlling a live TradingView Desktop chart.
+    instructions: `TradingView MCP — 87 tools for reading and controlling a live TradingView Desktop chart. Tools act on the tab that's active in TradingView's tab bar.
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
 Reading your chart:
 - chart_get_state → get symbol, timeframe, all indicator names + entity IDs (call first)
 - data_get_study_values → get current numeric values from ALL visible indicators (RSI, MACD, BB, EMA, etc.)
-- quote_get → get real-time price snapshot (last, OHLC, volume)
+- quote_get → real-time quote (last, bid/ask, OHLC, change). Pass symbol to quote anything without changing the chart
 - data_get_ohlcv → get price bars. ALWAYS pass summary=true unless you need individual bars
 
 Reading custom Pine indicator output (line.new/label.new/table.new/box.new drawings):
@@ -69,6 +71,20 @@ CONTEXT MANAGEMENT:
   }
 );
 
+// Every tool acts on the tab the user is looking at: before each call, re-attach
+// if they've switched TradingView tabs since the last one.
+const registerTool = server.tool.bind(server);
+server.tool = (...args) => {
+  const handler = args[args.length - 1];
+  if (typeof handler === 'function') {
+    args[args.length - 1] = async (...callArgs) => {
+      try { await followActiveTab(); } catch { /* the tool's own connect reports errors */ }
+      return handler(...callArgs);
+    };
+  }
+  return registerTool(...args);
+};
+
 // Register all tool groups
 registerHealthTools(server);
 registerChartTools(server);
@@ -84,6 +100,7 @@ registerWatchlistTools(server);
 registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
+registerMorningTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
 process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');
