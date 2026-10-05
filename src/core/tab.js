@@ -66,6 +66,8 @@ export async function list() {
       id: t?.id || null,
       chart_id: t?.chart_id || null,
       is_chart: !isNew,
+      // After a restart TradingView only loads a tab's page once it's opened.
+      loaded: !!t,
       tab_key: b.key,
     };
   });
@@ -326,6 +328,17 @@ export async function switchTab({ index }) {
       return false;
     });
     if (!ok) throw new Error(`Clicked tab "${tab.title}" but the tab bar did not switch to it.`);
+  }
+
+  // A tab that hasn't been opened since TradingView started has no page yet;
+  // clicking it starts loading one. Wait for it to appear before attaching.
+  if (!tab.id && tab.is_chart) {
+    for (let i = 0; i < 40 && !tab.id; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      const match = (await describeTargets()).find(t => t.is_chart && t.layout === tab.layout);
+      if (match) { tab.id = match.id; tab.chart_id = match.chart_id; tab.symbol = match.symbol; }
+    }
+    if (!tab.id) throw new Error(`Switched to "${tab.title}" but its chart didn't finish loading within 20s. Retry tab_list in a moment.`);
   }
 
   if (tab.id) {
