@@ -51,12 +51,26 @@ export async function list() {
     return { success: true, tab_count: tabs.length, tabs, note: 'Tab bar not found; listed in page-target order.' };
   }
 
+  // Match by layout name first. Right after TradingView starts, the tab bar can
+  // show an entry with only its symbol (no layout name yet); those are matched
+  // afterwards by symbol, and only when exactly one page fits.
   const used = new Set();
-  const tabs = bar.map((b, i) => {
-    const isNew = !b.layout && /^New tab$/i.test(b.title);
-    const pool = targets.filter(t => !used.has(t.id) && (isNew ? !t.is_chart : t.is_chart && t.layout === b.layout));
+  const isNewEntry = (b) => !b.layout && /^New tab$/i.test(b.title);
+  const matched = bar.map((b) => {
+    if (!isNewEntry(b) && !b.layout) return null;
+    const pool = targets.filter(t => !used.has(t.id) && (isNewEntry(b) ? !t.is_chart : t.is_chart && t.layout === b.layout));
     const t = pool.find(x => bare(x.symbol) === bare(b.symbol)) || pool[0] || null;
     if (t) used.add(t.id);
+    return t;
+  });
+  bar.forEach((b, i) => {
+    if (matched[i] || isNewEntry(b) || !b.symbol) return;
+    const pool = targets.filter(t => !used.has(t.id) && t.is_chart && bare(t.symbol) === bare(b.symbol));
+    if (pool.length === 1) { matched[i] = pool[0]; used.add(pool[0].id); }
+  });
+  const tabs = bar.map((b, i) => {
+    const isNew = isNewEntry(b);
+    const t = matched[i];
     return {
       index: i,
       active: b.active,
@@ -335,7 +349,7 @@ export async function switchTab({ index }) {
   if (!tab.id && tab.is_chart) {
     for (let i = 0; i < 40 && !tab.id; i++) {
       await new Promise(r => setTimeout(r, 500));
-      const match = (await describeTargets()).find(t => t.is_chart && t.layout === tab.layout);
+      const match = (await describeTargets()).find(t => t.is_chart && (tab.layout ? t.layout === tab.layout : bare(t.symbol) === bare(tab.symbol)));
       if (match) { tab.id = match.id; tab.chart_id = match.chart_id; tab.symbol = match.symbol; }
     }
     if (!tab.id) throw new Error(`Switched to "${tab.title}" but its chart didn't finish loading within 20s. Retry tab_list in a moment.`);

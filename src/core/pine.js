@@ -116,8 +116,10 @@ export async function ensurePineEditorOpen() {
     })()
   `);
 
+  // Up to 30s: the first open after TradingView starts loads the editor
+  // component and Monaco, which can take well over 10s on 3.4.x.
   let remounted = false;
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 150; i++) {
     await new Promise(r => setTimeout(r, 200));
     const ready = await evaluate(`(function() { return ${FIND_MONACO} !== null; })()`);
     if (ready) return true;
