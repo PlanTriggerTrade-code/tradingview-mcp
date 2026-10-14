@@ -1,6 +1,16 @@
 # TradingView MCP — Claude Instructions
 
-87 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222). Tools act on the tab that's active in TradingView's tab bar.
+87 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222), plus 9 layout-guard tools. Untargeted read tools act on the tab that's active in TradingView's tab bar.
+
+## Layout safety (read first)
+
+A layout guard (`src/layout-safety.js`, [docs/LAYOUT_SAFETY.md](docs/LAYOUT_SAFETY.md)) wraps every tool:
+
+- Reading any chart is allowed.
+- Changing one of the user's real charts needs `user_approved: true`, only after the user said yes for that chart. Every layout is real unless made with `scratch_layout_create` (recorded in `state/scratch-layouts.json`); scratch charts can be changed freely. Layouts listed by ID or name pattern in the user's `state/protected-layouts.json` (format: `protected-layouts.example.json`) always stay real; if that file is invalid, every write refuses with `PROTECTED_LAYOUTS_INVALID`.
+- Writes are target-bound: pass `target_id` (the `id` from `tab_list`) and `layout_id`; the URL layout, the loaded layout and `layout_id` must agree or nothing is written. Guarded writes: `chart_set_symbol`, `chart_set_timeframe`, `indicator_set_inputs`, `indicator_toggle_visibility`, `chart_manage_indicator`, `scratch_layout_create`, `pine_development_*`.
+- `ui_evaluate` (raw JavaScript) always needs `user_approved: true`, also on scratch charts. `scratch_layout_create` needs it when the tab shows a real chart; `pine_development_update` needs it when an open real chart uses the script. `capture_screenshot` with `method: "api"` is refused.
+- Every other changing tool is listed but disabled (description ends with `[Disabled: ...]`), including the legacy Pine editor tools, replay, drawing, alert, watchlist-change, pane, tab, layout, batch, `morning_brief` and UI click/keyboard/mouse tools. The decision tree below still names some of them; they refuse. Never work around a refusal through raw CDP, the CLI or another tool.
 
 ## Decision Tree — Which Tool When
 
@@ -34,6 +44,7 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 7. `capture_screenshot` → visual confirmation
 
 ### "Change the chart"
+Guarded: pass `target_id`, `layout_id` (and `user_approved` on a real chart). `chart_set_type`, `chart_scroll_to_date` and `chart_set_visible_range` are disabled.
 - `chart_set_symbol` → switch ticker (e.g., "AAPL", "ES1!", "NYMEX:CL1!")
 - `chart_set_timeframe` → switch resolution (e.g., "1", "5", "15", "60", "D", "W")
 - `chart_set_type` → switch chart style (Candles, HeikinAshi, Line, Area, Renko, etc.)
@@ -42,6 +53,7 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `chart_set_visible_range` → zoom to exact date range (unix timestamps)
 
 ### "Work on Pine Script"
+Use the guarded `pine_development_open` / `inspect` / `load` / `update` / `verify` flow (docs/LAYOUT_SAFETY.md); `pine_check` and `pine_analyze` need no chart. The legacy steps below are disabled:
 1. `pine_set_source` → inject code into editor
 2. `pine_smart_compile` → compile with auto-detection + error check
 3. `pine_get_errors` → read compilation errors

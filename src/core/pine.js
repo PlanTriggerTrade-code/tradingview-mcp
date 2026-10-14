@@ -6,7 +6,7 @@
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
 
 // ── Monaco finder (injected into TV page) ──
-const FIND_MONACO = `
+export const FIND_MONACO = `
   (function findMonacoEditor() {
     // TradingView keeps several Pine Monaco containers in the page: hidden ones
     // from previously opened scripts and, after the panel is closed and
@@ -80,6 +80,29 @@ const FIND_RUN_BUTTON = `
 `;
 
 
+// 'scripteditor' is the widget's registered name; activateScriptEditorTab()
+// silently no-ops while the widget is missing from the bar's enabled list
+// (the state after the user closes the panel), so enable + show come first.
+// FIND_MONACO, OPEN_EDITOR and CLICK_PINE_BUTTON are also used by the guarded
+// Pine development tools (src/pine-development.js).
+export const OPEN_EDITOR = `
+  (function() {
+    var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+    if (!bwb) return false;
+    if (typeof bwb.setWidgetAvailability === 'function') bwb.setWidgetAvailability('scripteditor', true);
+    if (typeof bwb.showWidget === 'function') bwb.showWidget('scripteditor');
+    if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab();
+    return true;
+  })()
+`;
+export const CLICK_PINE_BUTTON = `
+  (function() {
+    var btn = document.querySelector('[aria-label="Pine"]')
+      || document.querySelector('[data-name="pine-dialog-button"]');
+    if (btn) btn.click();
+  })()
+`;
+
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
  * Returns true if editor is accessible, false on timeout.
@@ -93,28 +116,8 @@ export async function ensurePineEditorOpen() {
   `);
   if (already) return true;
 
-  // 'scripteditor' is the widget's registered name; activateScriptEditorTab()
-  // silently no-ops while the widget is missing from the bar's enabled list
-  // (the state after the user closes the panel), so enable + show come first.
-  const OPEN_EDITOR = `
-    (function() {
-      var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-      if (!bwb) return false;
-      if (typeof bwb.setWidgetAvailability === 'function') bwb.setWidgetAvailability('scripteditor', true);
-      if (typeof bwb.showWidget === 'function') bwb.showWidget('scripteditor');
-      if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab();
-      return true;
-    })()
-  `;
   await evaluate(OPEN_EDITOR);
-
-  await evaluate(`
-    (function() {
-      var btn = document.querySelector('[aria-label="Pine"]')
-        || document.querySelector('[data-name="pine-dialog-button"]');
-      if (btn) btn.click();
-    })()
-  `);
+  await evaluate(CLICK_PINE_BUTTON);
 
   // Up to 30s: the first open after TradingView starts loads the editor
   // component and Monaco, which can take well over 10s on 3.4.x.

@@ -2,6 +2,24 @@
 
 This fork tracks [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp). Entries list what differs from upstream `main`.
 
+## 2.2.0 — 2026-10-14
+
+### Chart protection (layout guard)
+
+Every tool now goes through a guard ([docs/LAYOUT_SAFETY.md](docs/LAYOUT_SAFETY.md)). Reading any chart is allowed; changing one of your charts needs your yes (`user_approved: true`). Every layout counts as one of your real charts unless the assistant created it as a scratch chart. Writes are bound to an exact tab and layout (`target_id`, `layout_id`) and refuse if the URL, the loaded layout and the requested layout disagree. Tools that cannot prove which layout they act on are disabled.
+
+- **Guarded writes:** `chart_set_symbol`, `chart_set_timeframe`, `indicator_set_inputs`, `indicator_toggle_visibility` and `chart_manage_indicator` take `target_id`, `layout_id` and `user_approved`. `ui_evaluate` always needs `user_approved: true`, scratch charts included.
+- **New tools:**
+  - `layout_safety_inspect`: which layout a tab really shows, its sections and state hash, and whether it is a real, protected or scratch chart.
+  - `study_inputs_get`: every input (id, title, value) of a study, on an explicit tab and layout.
+  - `strategy_trades_get`: a strategy's closed trades, on an explicit tab and layout.
+  - `scratch_layout_create`: a new empty layout in a tab, recorded as a scratch chart (needs approval when the tab shows a real chart).
+  - `pine_development_open`, `pine_development_inspect`, `pine_development_load`, `pine_development_update`, `pine_development_verify`: guarded Pine development with backups, locks, identity checks and a verified cloud save. Saving asks for approval when an open real chart uses the script.
+- **Now disabled** (still listed, every call refuses): `alert_create`, `alert_delete`, `batch_run`, `chart_set_type`, `chart_set_visible_range`, `chart_scroll_to_date`, `draw_shape`, `draw_clear`, `draw_remove_one`, `tv_launch`, `indicator_search`, `indicator_add`, `morning_brief`, `session_save`, `pane_set_layout`, `pane_focus`, `pane_set_symbol`, `pine_get_source`, `pine_editor_state`, `pine_set_source`, `pine_compile`, `pine_get_errors`, `pine_save`, `pine_get_console`, `pine_smart_compile`, `pine_new`, `pine_open`, `replay_start`, `replay_step`, `replay_autoplay`, `replay_stop`, `replay_trade`, `tab_new`, `layout_new`, `tab_close`, `tab_switch`, `ui_click`, `ui_open_panel`, `ui_fullscreen`, `layout_switch`, `ui_keyboard`, `ui_type_text`, `ui_hover`, `ui_scroll`, `ui_mouse_click`, `watchlist_add`, `watchlist_add_bulk`, `watchlist_remove`.
+- `capture_screenshot` refuses `method: "api"` (TradingView's own snapshot publishes the image to its servers); the default local capture is unchanged.
+- **`state/` folder** at the repository root (ignored by Git) holds the guard's working files: `scratch-layouts.json` (scratch charts, recorded automatically), `protected-layouts.json` (your own list of layouts, by ID or name pattern, that must never count as scratch; see `protected-layouts.example.json`), `backups/` and `locks/` of the Pine tools.
+- Tests: `npm run test:safety` (also part of `npm test`) checks that every registered tool is classified, that read tools send no writes (against a fake DevTools endpoint) and the permission rules, all without TradingView.
+
 ## 2.1.0 — 2026-10-05
 
 Based on upstream `main` at `c05b8f5` (2026-07-28). Tested against TradingView Desktop 3.4.1.8194 (Windows, Microsoft Store build).

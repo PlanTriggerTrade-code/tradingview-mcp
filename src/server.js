@@ -15,16 +15,21 @@ import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
 import { registerMorningTools } from './tools/morning.js';
-import { followActiveTab } from './connection.js';
+import { followActiveTab, withTimeout, CDP_HOST, CDP_PORT } from './connection.js';
+import CDP from 'chrome-remote-interface';
+import { z } from 'zod';
+import { booleanParam } from './tools/_schema.js';
+import { protectRegistrations } from './layout-safety.js';
+import { registerPineDevelopment } from './pine-development.js';
 
 const server = new McpServer(
   {
     name: 'tradingview',
-    version: '2.1.0',
+    version: '2.2.0',
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-    instructions: `TradingView MCP — 87 tools for reading and controlling a live TradingView Desktop chart. Tools act on the tab that's active in TradingView's tab bar.
+    instructions: `TradingView MCP — tools for reading and (guarded) changing a live TradingView Desktop chart. Untargeted read tools act on the tab that's active in TradingView's tab bar. Tools marked [Disabled] in their description refuse every call (layout guard).
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -42,25 +47,29 @@ Reading custom Pine indicator output (line.new/label.new/table.new/box.new drawi
 - ALWAYS pass study_filter to target a specific indicator by name (e.g., study_filter="Profiler")
 - Indicators must be VISIBLE on chart for these to work
 
-Changing the chart:
-- chart_set_symbol, chart_set_timeframe, chart_set_type → change ticker/resolution/style
+LAYOUT SAFETY (docs/LAYOUT_SAFETY.md):
+- Read any chart. Change one of the user's real charts only after the user said yes for that chart (user_approved: true).
+- For tests, make your own chart with scratch_layout_create; scratch charts need no approval (ui_evaluate still does).
+- Every target-bound tool takes target_id (the id from tab_list) and layout_id; the layout is verified before each change.
+- Read-only on any chart: layout_safety_inspect, study_inputs_get, strategy_trades_get.
+- Use pine_development_open/inspect/load/update/verify for guarded Pine development and verified cloud saves.
+- Target-bound writes: chart_set_symbol, chart_set_timeframe, indicator_set_inputs, indicator_toggle_visibility, chart_manage_indicator.
+- ui_evaluate (raw JavaScript) ALWAYS needs user_approved: true, also on scratch charts. scratch_layout_create needs it when the tab shows a real chart; pine_development_update needs it when an open real chart uses the script.
+- capture_screenshot method "api" (publishes to TradingView's servers) is refused.
+- UI clicks/keyboard, layout/tab switching and creation, layout saves, legacy Pine editor actions, drawings, alerts, watchlist changes, replay and batch tools remain disabled.
+- Never bypass a refusal via raw CDP, CLI or another tool. See docs/LAYOUT_SAFETY.md.
+
+Changing the chart (only the guarded target-bound operations above are available):
+- chart_set_symbol, chart_set_timeframe → change ticker/resolution
 - chart_manage_indicator → add/remove studies. USE FULL NAMES: "Relative Strength Index" not "RSI"
-- chart_scroll_to_date → jump to a date (ISO format)
-- indicator_set_inputs → change indicator settings (length, source, etc.)
+- indicator_set_inputs, indicator_toggle_visibility → change indicator settings / visibility
 
 Pine Script development:
-- pine_set_source → inject code, pine_smart_compile → compile + check errors
-- pine_get_errors → read errors, pine_get_console → read log output
-- WARNING: pine_get_source can return 200KB+ for complex scripts — avoid unless editing
+- pine_development_* (see LAYOUT SAFETY) replace the disabled pine_set_source / pine_smart_compile / pine_save / pine_open / pine_new
+- pine_check → compile through TradingView's server without touching a chart; pine_analyze → offline static analysis
 
 Screenshots: capture_screenshot → regions: "full", "chart", "strategy_tester"
-Replay: replay_start → replay_step → replay_trade → replay_status → replay_stop
-Batch: batch_run → run action across multiple symbols/timeframes
-Drawing: draw_shape → horizontal_line, trend_line, rectangle, text
-Alerts: alert_create, alert_list, alert_delete
-Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
-Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
-Tabs: tab_list, tab_new, tab_close, tab_switch
+Reads: replay_status, draw_list, draw_get_properties, alert_list, pane_list, tab_list, layout_list, watchlist_get
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv
@@ -71,8 +80,24 @@ CONTEXT MANAGEMENT:
   }
 );
 
+// Layout guard (docs/LAYOUT_SAFETY.md). Target-bound tools attach to the exact tab they are given;
+// every CDP call is bounded like the rest of the server's (see connection.js).
+const connect = async (target) => {
+  const client = await withTimeout(CDP({ host: CDP_HOST, port: CDP_PORT, target }), 5000, 'CDP attach');
+  return {
+    close: () => client.close(),
+    Runtime: { evaluate: (params) => withTimeout(client.Runtime.evaluate(params), 60000, 'Guarded evaluate') },
+  };
+};
+const listTargets = () => CDP.List({ host: CDP_HOST, port: CDP_PORT });
+registerPineDevelopment(server, { z, connect, listTargets, bool: booleanParam });
+// Installed before the tool groups register, so a new or unreviewed tool is disabled by default.
+protectRegistrations(server, { z, connect, bool: booleanParam });
+
 // Every tool acts on the tab the user is looking at: before each call, re-attach
-// if they've switched TradingView tabs since the last one.
+// if they've switched TradingView tabs since the last one. Installed on top of the
+// guard: read tools follow the active tab inside the guard's queue; guarded writes
+// and disabled tools never use the followed connection.
 const registerTool = server.tool.bind(server);
 server.tool = (...args) => {
   const handler = args[args.length - 1];

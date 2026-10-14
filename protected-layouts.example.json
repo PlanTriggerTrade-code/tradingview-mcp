@@ -1,0 +1,10 @@
+{
+  "layouts": [
+    { "id": "EXAMPLE1", "name": "Example: my main trading chart" },
+    { "id": "EXAMPLE2", "name": "Example: my drawings chart" }
+  ],
+  "names": [
+    "do[\\s_.-]*not[\\s_.-]*touch",
+    "^live\\b"
+  ]
+}

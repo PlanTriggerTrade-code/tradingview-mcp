@@ -17,6 +17,18 @@ Personal AI assistant for your TradingView Desktop charts. Connects Claude Code 
 > [!CAUTION]
 > This tool accesses undocumented internal TradingView APIs via the Electron debug interface. These can change or break without notice in any TradingView update. Pin your TradingView Desktop version if stability matters to you.
 
+## Chart protection
+
+Your chart layouts are guarded. **Many tools are disabled by design**, and the rest follow one rule:
+
+- **Reading any chart is allowed.**
+- **Changing one of your charts needs your yes.** The assistant asks first, then passes `user_approved: true`. Every layout counts as one of your real charts unless the assistant created it itself as a *scratch chart* with `scratch_layout_create`; scratch charts can be changed freely.
+- **Writes are bound to an exact tab and layout** (`target_id` from `tab_list`, `layout_id` from the chart URL) and verified before anything is sent; if the loaded layout is not the one requested, nothing happens.
+- **`ui_evaluate` (raw JavaScript) always needs your yes**, even on scratch charts.
+- **Disabled:** tools that cannot prove which layout they act on: legacy Pine editor tools (use `pine_development_*`), replay, drawings, alerts, watchlist changes, pane/tab/layout switching, batch runs, `morning_brief` and UI clicks/keyboard/mouse. They stay listed and refuse every call.
+
+To mark layouts that must never be treated as scratch charts, copy [`protected-layouts.example.json`](protected-layouts.example.json) to `state/protected-layouts.json` and list their IDs (from `https://www.tradingview.com/chart/<id>/`) or name patterns. The `state/` folder is ignored by Git. Details and the full tool list: [docs/LAYOUT_SAFETY.md](docs/LAYOUT_SAFETY.md).
+
 ## About this fork
 
 Tested against TradingView Desktop **3.4.1** (Windows, Microsoft Store build). Highlights:
@@ -29,6 +41,7 @@ Tested against TradingView Desktop **3.4.1** (Windows, Microsoft Store build). H
 - **`tv_launch` never kills a working session**, and every CDP call has a timeout so a hung TradingView can't freeze your AI client.
 - **Safer**: no self-update tool or GitHub phone-home, injection-safe tool inputs, `"false"` no longer read as true (that used to delete all alerts), 0 npm audit findings.
 - **`morning_brief`** watchlist scan from [LewisWJackson/tradingview-mcp-jackson](https://github.com/LewisWJackson/tradingview-mcp-jackson), with its path checks fixed for Windows.
+- **Chart protection.** Writes are guarded and many tools are disabled; see [Chart protection](#chart-protection).
 
 ### The debug port, in one paragraph
 
@@ -242,6 +255,8 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 
 ## Tool Reference (87 MCP tools)
 
+> With the layout guard, only the read tools and the target-bound writes are active; the rest are listed but disabled. The full classification is in [docs/LAYOUT_SAFETY.md](docs/LAYOUT_SAFETY.md), which also documents the 9 guard tools (`layout_safety_inspect`, `study_inputs_get`, `strategy_trades_get`, `scratch_layout_create`, `pine_development_*`).
+
 ### Chart Reading
 
 | Tool | When to use | Output size |
@@ -366,6 +381,8 @@ The key flag: `--remote-debugging-port=9222`
 ```bash
 # Requires TradingView running with --remote-debugging-port=9222
 npm test
+# Layout guard tests only (no TradingView connection)
+npm run test:safety
 ```
 
 29 tests covering: Pine Script static analysis, server-side compilation, and CLI routing.
