@@ -2,6 +2,19 @@
 
 This fork tracks [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp). Entries list what differs from upstream `main`.
 
+## 2.3.0 — 2026-10-14
+
+### Chart protection: one rule, all tools enabled
+
+The 2.2.0 guard disabled 48 tools and treated every layout as off limits. 2.3.0 replaces it with a single rule: **a tool never changes one of your protected charts without your yes.** Everything else works.
+
+- **Protected charts** are the ones listed in `state/protected-layouts.json` (by layout ID or name pattern; see `protected-layouts.example.json`). What counts is the layout actually loaded in the tab, not the one the URL shows.
+- **Tools that may change a chart** (symbol, timeframe, studies, drawings, replay, panes, Pine compile/save, `layout_switch`, `ui_evaluate`, raw clicks and keys, ...) check the layout loaded in the tab they act on before running. On a protected chart they refuse with `PROTECTED_CHART_NEEDS_PERMISSION` unless `user_approved: true`. They need no extra parameters; an optional `layout_id` must match the loaded layout. While they run, the connection stays pinned to the checked tab.
+- **Pine saves** (`pine_save`, `pine_compile`, `pine_smart_compile`, `pine_development_update`) ask only when an open protected chart uses the script; the result names any protected charts updated and says when something could not be checked.
+- **All 48 tools disabled in 2.2.0 are enabled again**; read and account tools (alerts, watchlist, tabs, new layouts, `tv_launch`, fullscreen, the Pine editor's text) run freely. `capture_screenshot` accepts `method: "api"` again.
+- **Removed:** the scratch-chart registry and `scratch_layout_create`, the required `target_id`/`layout_id` on chart changes, and the always-ask rule for raw JavaScript, clicks and keys.
+- `layout_safety_inspect`, `study_inputs_get`, `strategy_trades_get`: `layout_id` is optional.
+
 ## 2.2.0 — 2026-10-14
 
 ### Chart protection (layout guard)

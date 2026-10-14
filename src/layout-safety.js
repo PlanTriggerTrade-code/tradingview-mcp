@@ -3,17 +3,13 @@ import { mkdir, writeFile, readFile, unlink, rmdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// The rule: automation may read any chart, but may change one of the user's real charts only
-// after the user said yes in chat (the caller passes user_approved: true). Every layout is a real
-// chart unless this server created it as a scratch chart (recorded automatically in
-// state/scratch-layouts.json at the repository root); scratch charts can be changed freely.
-// Layouts the user lists in state/protected-layouts.json (by ID or name pattern) stay real even if
-// the scratch registry lists them. Every write first proves which layout it is on (URL, loaded
-// save destination and requested ID must agree, checked again inside the same evaluation), so a
-// write cannot land on a different layout than the URL shows.
-// Tools that change nothing in TradingView: not the chart, layout, drawings, alerts, watchlist,
-// panes, tabs, Pine editor or saved scripts. Everything else is a write. The full table with
-// reasons is in docs/LAYOUT_SAFETY.md; tests/layout-safety-classification.test.js keeps both in step.
+// The rule: automation never changes one of the user's protected charts without their yes.
+// A chart is protected when the layout actually loaded in the tab (its loaded layout ID, not the
+// URL) is listed in state/protected-layouts.json, by ID or by a name pattern. A tool that may
+// change the chart in a tab is refused there unless the caller passes user_approved: true, which
+// it may only do after the user said yes for that chart. Every other chart is free.
+
+// Tools that change nothing in TradingView.
 export const READ_TOOLS = new Set([
   'chart_get_state', 'chart_get_visible_range', 'symbol_info', 'symbol_search',
   'quote_get', 'data_get_ohlcv', 'data_get_indicator', 'data_get_study_values',
@@ -23,59 +19,65 @@ export const READ_TOOLS = new Set([
   'pine_list_scripts', 'pine_analyze', 'replay_status',
   'layout_list', 'pane_list', 'tab_list', 'tv_health_check', 'tv_discover', 'tv_ui_state',
   'ui_find_element', 'capture_screenshot', 'watchlist_get', 'session_get',
+  'pine_get_source', 'pine_get_errors', 'pine_get_console', 'pine_editor_state', 'indicator_search',
 ]);
-// Targeted writes: real charts need user_approved, scratch charts do not.
-export const WRITE_TOOLS = new Set(['chart_set_symbol', 'chart_set_timeframe',
-  'indicator_set_inputs', 'indicator_toggle_visibility', 'chart_manage_indicator', 'ui_evaluate']);
-// Tools the guard registers itself (here and in pine-development.js). All are target-bound.
+// Tools that change account or app state (alerts, watchlist, tabs, new layouts, the app window,
+// the Pine editor's buffer or binding, local files) but not a chart. They run freely.
+export const ACCOUNT_TOOLS = new Set([
+  'alert_create', 'alert_delete', 'watchlist_add', 'watchlist_add_bulk', 'watchlist_remove',
+  'tv_launch', 'tab_new', 'tab_close', 'tab_switch', 'layout_new', 'session_save', 'ui_fullscreen',
+  'pine_set_source', 'pine_open', 'ui_hover', 'ui_open_panel',
+]);
+// Tools that may change the chart in the active tab. Checked: refused on a protected chart
+// without user_approved.
+export const CHART_TOOLS = new Set([
+  'chart_set_symbol', 'chart_set_timeframe', 'chart_set_type', 'chart_set_visible_range', 'chart_scroll_to_date',
+  'chart_manage_indicator', 'indicator_set_inputs', 'indicator_toggle_visibility', 'indicator_add',
+  'draw_shape', 'draw_clear', 'draw_remove_one', 'morning_brief', 'batch_run',
+  'pane_set_layout', 'pane_focus', 'pane_set_symbol',
+  'pine_new', 'pine_compile', 'pine_save', 'pine_smart_compile',
+  'replay_start', 'replay_step', 'replay_autoplay', 'replay_stop', 'replay_trade',
+  'layout_switch', 'ui_evaluate', 'ui_click', 'ui_keyboard', 'ui_type_text', 'ui_mouse_click', 'ui_scroll',
+]);
+// Chart tools that can save the Pine script bound to the editor. Saving updates the script on
+// every layout that uses it, so they also check the other open tabs.
+export const PINE_SAVE_TOOLS = new Set(['pine_save', 'pine_compile', 'pine_smart_compile']);
+// Tools the guard registers itself (here and in pine-development.js). They take target_id.
 export const GUARD_TOOLS = Object.freeze({
   layout_safety_inspect: 'read', study_inputs_get: 'read', strategy_trades_get: 'read',
   pine_development_verify: 'read',
-  scratch_layout_create: 'write', pine_development_open: 'write', pine_development_inspect: 'write',
-  pine_development_load: 'write', pine_development_update: 'write',
+  pine_development_open: 'checked', pine_development_inspect: 'checked',
+  pine_development_load: 'checked', pine_development_update: 'checked',
 });
-/** 'read', 'write' (target-bound and guarded) or 'disabled'. */
+/** 'read' or 'account' (free), 'checked' (may change a chart) or 'disabled' (not reviewed). */
 export function classify(name) {
   if (Object.hasOwn(GUARD_TOOLS, name)) return GUARD_TOOLS[name];
   if (READ_TOOLS.has(name)) return 'read';
-  if (WRITE_TOOLS.has(name)) return 'write';
-  return 'disabled';
+  if (ACCOUNT_TOOLS.has(name)) return 'account';
+  if (CHART_TOOLS.has(name)) return 'checked';
+  return 'disabled'; // a tool nobody has reviewed yet
 }
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-// Working files (scratch-layouts.json, backups/, locks/) live in the repository's state/ folder,
+// Working files (protected-layouts.json, backups/, locks/) live in the repository's state/ folder,
 // found from this module's location so the process working directory does not matter.
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'state');
 
-const SCRATCH = root => join(root, 'scratch-layouts.json');
-export async function scratchLayouts(root = ROOT) {
-  try { return new Set((JSON.parse(await readFile(SCRATCH(root), 'utf8')).layouts || []).map(l => l.id)); }
-  catch (e) { if (e.code === 'ENOENT') return new Set(); throw e; }
-}
-export async function recordScratch(root, id, name) {
-  if (!/^[A-Za-z0-9_-]+$/.test(id || '')) throw new Error('Invalid layout ID');
-  let data = { layouts: [] };
-  try { data = JSON.parse(await readFile(SCRATCH(root), 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-  if (!data.layouts.some(l => l.id === id)) data.layouts.push({ id, name, createdAt: new Date().toISOString() });
-  await mkdir(root, { recursive: true });
-  await writeFile(SCRATCH(root), JSON.stringify(data, null, 1));
-}
-// The user's own list of layouts that must never count as scratch charts: local, ignored by Git.
-// Format (see protected-layouts.example.json):
+// The user's list of protected charts: local, ignored by Git. Format (see
+// protected-layouts.example.json):
 //   { "layouts": [{ "id": "<layout id>", "name": "<label>" }], "names": ["<regex>", ...] }
 // Name patterns are case-insensitive regular expressions matched against the layout name.
-// Read again on every operation, so edits apply without a restart. A missing file adds nothing
-// (every layout is still real by default); an invalid one throws PROTECTED_LAYOUTS_INVALID, and
-// every write refuses until it is fixed.
+// Read again on every check, so edits apply without a restart. A missing file protects nothing;
+// an invalid one throws PROTECTED_LAYOUTS_INVALID, and every change refuses until it is fixed.
 export const PROTECTION_FILE = 'protected-layouts.json';
 export const EMPTY_PROTECTION = Object.freeze({ ids: new Set(), patterns: [], layouts: [] });
 export async function loadProtection(root = ROOT) {
   const path = join(root, PROTECTION_FILE);
-  const invalid = why => new Error(`PROTECTED_LAYOUTS_INVALID: ${path}: ${why}. No write performed; fix or remove the file.`);
+  const invalid = why => new Error(`PROTECTED_LAYOUTS_INVALID: ${path}: ${why}. Nothing was changed; fix or remove the file.`);
   let text;
   try { text = await readFile(path, 'utf8'); }
   catch (e) { if (e.code === 'ENOENT') return EMPTY_PROTECTION; throw invalid(e.message); }
   let data;
-  try { data = JSON.parse(text.replace(/^\uFEFF/, '')); } catch (e) { throw invalid(`not valid JSON (${e.message})`); }
+  try { data = JSON.parse(text.replace(/^﻿/, '')); } catch (e) { throw invalid(`not valid JSON (${e.message})`); }
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw invalid('expected an object');
   const unknown = Object.keys(data).filter(k => k !== 'layouts' && k !== 'names');
   if (unknown.length) throw invalid(`unknown key(s) ${unknown.join(', ')}; only "layouts" and "names" are allowed`);
@@ -94,8 +96,7 @@ export async function loadProtection(root = ROOT) {
 }
 export const isProtected = (uid, name, protection) =>
   protection.ids.has(uid) || protection.patterns.some(p => p.test(name || ''));
-export const isRealChart = (uid, name, scratch, protection = EMPTY_PROTECTION) =>
-  isProtected(uid, name, protection) || !scratch.has(uid);
+const needsPermission = s => new Error(`PROTECTED_CHART_NEEDS_PERMISSION: "${s.name}" (${s.uid}) is a protected chart. Ask the user; pass user_approved: true only after they said yes for this chart.`);
 
 // This expression only reads state. Includes hidden chart sections, not just activeChart().
 export const SNAPSHOT = `(() => {
@@ -105,8 +106,10 @@ export const SNAPSHOT = `(() => {
    chartId:String(a._activeChartWidgetWV.value()._chartWidget.id()), state};
 })()`;
 
-// For writable checks pass the loaded protection list; without it the check refuses.
-export function validate(s, expected, { writable = true, protection } = {}) {
+// Checks for the Pine development tools, which work on an explicit tab and layout. For writable
+// checks pass the loaded protection list (without it the check refuses) and whether the user
+// approved.
+export function validate(s, expected, { writable = true, protection, approved = false } = {}) {
   const url = new URL(s.url);
   const urlId = url.pathname.match(/^\/chart\/([^/]+)\/?$/)?.[1];
   if (url.hostname !== 'www.tradingview.com' || !s.uid || urlId !== s.uid || s.uid !== expected.layout_id)
@@ -115,8 +118,7 @@ export function validate(s, expected, { writable = true, protection } = {}) {
       s.state.charts.some(c => !c.chartId || !Array.isArray(c.panes)))
     throw new Error('INCOMPLETE_LAYOUT: cannot back up all chart sections.');
   if (writable && !protection) throw new Error('PROTECTION_NOT_LOADED: no write performed.');
-  if (writable && isProtected(s.uid, s.name, protection))
-    throw new Error('PROTECTED_MANUAL_LAYOUT: automation writes are disabled for this layout.');
+  if (writable && approved !== true && isProtected(s.uid, s.name, protection)) throw needsPermission(s);
   if (expected.chart_id && s.chartId !== expected.chart_id)
     throw new Error('ACTIVE_SECTION_CHANGED: inspect the intended section again.');
   if (expected.state_hash && hash(s.state) !== expected.state_hash)
@@ -151,44 +153,7 @@ export async function backup(root, snapshot, tool) {
   return path;
 }
 
-export function mutation(tool, args) {
-  const q = JSON.stringify;
-  if (tool === 'ui_evaluate') {
-    if (typeof args.expression !== 'string' || !args.expression.trim()) throw new Error('Expression required');
-    return `return await (${args.expression});`;
-  }
-  if (tool === 'chart_set_symbol') return `c.setSymbol(${q(args.symbol)}, {});`;
-  if (tool === 'chart_set_timeframe') return `c.setResolution(${q(args.timeframe)}, {});`;
-  if (tool === 'indicator_toggle_visibility') return `c.getStudyById(${q(args.entity_id)}).setVisible(${q(args.visible)});`;
-  if (tool === 'indicator_set_inputs') {
-    const inputs = typeof args.inputs === 'string' ? JSON.parse(args.inputs) : args.inputs;
-    if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs) || !Object.keys(inputs).length) throw new Error('Nonempty inputs object required');
-    return `const study=c.getStudyById(${q(args.entity_id)}), inputs=${q(inputs)}, values=study.getInputValues();
-      if(Object.keys(inputs).some(k=>!values.some(v=>v.id===k))) throw Error('Unknown input ID');
-      study.setInputValues(values.map(v=>Object.hasOwn(inputs,v.id)?{...v,value:inputs[v.id]}:v));`;
-  }
-  if (tool === 'chart_manage_indicator' && args.action === 'add') {
-    const inputs = typeof args.inputs === 'string' ? JSON.parse(args.inputs) : (args.inputs || {});
-    return `await c.createStudy(${q(args.indicator)}, false, false, ${q(Object.entries(inputs).map(([id,value])=>({id,value})))});`;
-  }
-  if (tool === 'chart_manage_indicator' && args.action === 'remove') {
-    if (!args.entity_id) throw new Error('entity_id required to remove a study');
-    return `c.removeEntity(${q(args.entity_id)});`;
-  }
-  throw new Error('UNSUPPORTED_OPERATION');
-}
-
-// Re-check identity in the same evaluation as the change: the URL can show one layout while
-// another is loaded, and a write must never land on a layout other than the requested one.
-export function identityExpression(snapshot, code) {
-  return `(async()=>{const a=window.TradingViewApi, m=a?._chartWidgetCollection?.metaInfo;
-    if(location.href!==${JSON.stringify(snapshot.url)} || m?.uid?.value()!==${JSON.stringify(snapshot.uid)})
-      throw Error('LAYOUT_CHANGED_BEFORE_WRITE');
-    const c=a._activeChartWidgetWV.value(); ${code}
-    return true;
-  })()`;
-}
-
+// Re-checks the whole layout state inside the same evaluation as the change.
 export function guardedExpression(snapshot, code) {
   return `(async()=>{const s=${SNAPSHOT};
     if(s.uid!==${JSON.stringify(snapshot.uid)} || s.url!==${JSON.stringify(snapshot.url)} ||
@@ -213,87 +178,7 @@ export function verifyPreserved(before, after) {
   }
 }
 
-export function checkIdentity(s, layout_id) {
-  const url = new URL(s.url);
-  const urlId = url.pathname.match(/^\/chart\/([^/]+)\/?$/)?.[1];
-  if (url.hostname !== 'www.tradingview.com' || !s.uid || urlId !== s.uid || s.uid !== layout_id)
-    throw new Error('LAYOUT_IDENTITY_MISMATCH: URL, loaded save destination and requested layout must match. No write performed.');
-}
-
-// One write: prove the layout, require permission on a real chart, apply, prove it again.
-export async function guardedWrite({target_id, layout_id, user_approved, tool, args}, deps) {
-  if (![target_id,layout_id].every(x=>typeof x==='string' && x.length)) throw new Error('Explicit target_id and layout_id required (tab_list / layout_safety_inspect)');
-  // Arbitrary JavaScript can reach any layout, alert or saved script from a scratch chart
-  // (loadChartFromServer, saveChartToServer, fetch...), so the identity check cannot contain it:
-  // ui_evaluate always needs the user's yes, on every chart. Refused before connecting.
-  if (tool === 'ui_evaluate' && user_approved !== true)
-    throw new Error('UI_EVALUATE_NEEDS_PERMISSION: ui_evaluate runs arbitrary JavaScript and always needs the user\'s yes (user_approved: true), also on scratch charts.');
-  const code = mutation(tool, args);
-  const root = deps.root || ROOT;
-  const protection = await loadProtection(root);
-  const client = await deps.connect(target_id);
-  const run = async expression => {
-    const r=await client.Runtime.evaluate({expression, returnByValue:true, awaitPromise:true});
-    if(r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
-    return r.result.value;
-  };
-  try {
-    const before=await run(SNAPSHOT);
-    checkIdentity(before, layout_id);
-    const real = isRealChart(before.uid, before.name, await scratchLayouts(root), protection);
-    if (real && user_approved !== true)
-      throw new Error(`REAL_CHART_NEEDS_PERMISSION: "${before.name}" (${before.uid}) is one of the user's charts. Ask the user; pass user_approved: true only after they said yes for this chart.`);
-    const value=await run(identityExpression(before,code));
-    const after=await run(SNAPSHOT);
-    checkIdentity(after, layout_id);
-    return {success:true, layout_id:after.uid, layout_name:after.name, real_chart:real,
-      ...(tool==='ui_evaluate' ? {result:value} : {}), chart_id:after.chartId, saved:false};
-  } finally { await client.close(); }
-}
-
-// A new scratch chart in the given tab. The layout that was showing stays saved as it is, but it
-// leaves the tab: on one of the user's real charts that needs the user's yes.
-export const NEW_LAYOUT = `(async()=>{const a=window.TradingViewApi;await a.createNewLayout();return true;})()`;
-// A freshly created layout: one chart section whose panes hold only the main series.
-export function isEmptyLayout(state) {
-  if (!Array.isArray(state?.charts) || state.charts.length !== 1) return false;
-  const sources = (state.charts[0].panes || []).flatMap(p => p.sources || []);
-  return sources.length === 1 && sources[0]?.type === 'MainSeries';
-}
-export async function createScratch({target_id, layout_id, name, user_approved}, deps) {
-  const root = deps.root || ROOT;
-  const protection = await loadProtection(root);
-  const client = await deps.connect(target_id);
-  const run = async expression => {
-    const r=await client.Runtime.evaluate({expression, returnByValue:true, awaitPromise:true});
-    if(r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
-    return r.result.value;
-  };
-  try {
-    const before=await run(SNAPSHOT);
-    checkIdentity(before, layout_id);
-    if (isRealChart(before.uid, before.name, await scratchLayouts(root), protection) && user_approved !== true)
-      throw new Error(`REAL_CHART_NEEDS_PERMISSION: "${before.name}" (${before.uid}) is one of the user's charts and would leave this tab. Use a tab showing a scratch chart, or pass user_approved: true after the user said yes.`);
-    await run(NEW_LAYOUT);
-    let after;
-    for (let i=0; i<40; i++) {
-      await (deps.delay || (ms=>new Promise(r=>setTimeout(r,ms))))(500);
-      try { after=await run(SNAPSHOT); } catch { continue; }
-      if (after.uid && after.uid !== before.uid) break;
-    }
-    if (!after || !after.uid || after.uid === before.uid) throw new Error('NEW_LAYOUT_NOT_CONFIRMED: no new saved layout loaded; nothing recorded, nothing written.');
-    checkIdentity(after, after.uid);
-    // Record only what is provably the new empty layout: never a protected layout (by ID or name),
-    // never one that already has studies, drawings or several sections.
-    if (isProtected(after.uid, after.name, protection) || !isEmptyLayout(after.state))
-      throw new Error(`SCRATCH_NOT_CONFIRMED: the layout now in the tab ("${after.name}", ${after.uid}) is not a new empty layout; nothing recorded.`);
-    await recordScratch(root, after.uid, name || after.name);
-    return {success:true, target_id, layout_id:after.uid, name:after.name, previous_layout:before.uid,
-      note:'Recorded as a scratch chart: writes there need no permission (ui_evaluate always does). The previous chart was not changed.'};
-  } finally { await client.close(); }
-}
-
-// Read-only inspection on an explicit tab and layout. Never writes; protected layouts included.
+// Read-only inspection on an explicit tab. Never writes; protected layouts included.
 export const STUDY_INPUTS = id => `(()=>{const c=window.TradingViewApi.activeChart();
   const st=c.getStudyById(${JSON.stringify(id)});const vals=st.getInputValues();const by={};
   for(const v of vals)by[v.id]=v.value;
@@ -309,21 +194,117 @@ export const STRATEGY_TRADES = id => `(()=>{const a=window.TradingViewApi,w=a._a
     quantity:t.q,exit:{comment:t.x.c,time:t.x.tm,bar:t.x.b,price:t.x.p},profit:t.tp&&t.tp.v}))};
 })()`;
 
-export const DISABLED_MARK = ' [Disabled: no target-bound implementation]';
-// Read tools with an argument that would change something outside the chart.
-export const READ_ARGUMENT_GUARDS = Object.freeze({
-  // takeScreenshot() publishes a snapshot to TradingView's servers.
-  capture_screenshot: args => (args?.method === 'api'
-    ? 'SNAPSHOT_PUBLISH_DISABLED: method "api" publishes a snapshot to TradingView\'s servers; use the default CDP capture.' : null),
-});
-const READ_ARGUMENT_NOTES = Object.freeze({ capture_screenshot: ' [method "api" is disabled by the layout guard]' });
-export const UI_EVALUATE_NOTE = ' Always needs user_approved: true (the user\'s yes), also on scratch charts: arbitrary JavaScript can reach any layout.';
-export const WRITE_NOTE = ' Pass target_id and layout_id (tab_list). On one of the user\'s real charts also user_approved: true, only after the user said yes for that chart; charts made with scratch_layout_create need no approval.';
+export const DISABLED_MARK = ' [Disabled: not reviewed by the layout guard]';
+export const CHECKED_NOTE = ' Refused on a protected chart (state/protected-layouts.json) unless user_approved: true, which may only be passed after the user said yes for that chart. Optional layout_id must match the layout loaded in the tab.';
 
-// Default-deny registration: tools without a target-bound implementation cannot write.
-// Install before any tool group registers, so a new or unreviewed tool is disabled by default.
-// `bool` builds the user_approved schema (server.js passes the repository's booleanParam).
-export function protectRegistrations(server, {z, connect, root=ROOT, bool}) {
+// Saving a script makes TradingView update its instances on every layout it has open.
+// A study uses the script when its state carries the script ID as pineId / scriptIdPart.
+export function usesScript(value, scriptId) {
+  if (!value || typeof value !== 'object') return false;
+  for (const [k, v] of Object.entries(value)) {
+    if ((k === 'pineId' || k === 'scriptIdPart') && v === scriptId) return true;
+    if (v && typeof v === 'object' && usesScript(v, scriptId)) return true;
+  }
+  return false;
+}
+/**
+ * Reads every open chart tab (read-only SNAPSHOT) and returns the protected charts that use the
+ * script (`found`) and the tabs that could not be read (`unreadable`). Layouts that are not open in
+ * TradingView cannot be checked.
+ */
+export async function protectedChartsUsingScript(scriptId, { connect, listTargets, root = ROOT, exclude = null }) {
+  if (typeof listTargets !== 'function') return { found: [], unreadable: ['the open tabs could not be listed'] };
+  const protection = await loadProtection(root);
+  const tabs = (await listTargets()).filter(t => (t.type === 'page' || t.type === 'webview') && /tradingview\.com\/chart/i.test(t.url || ''));
+  const found = [], unreadable = [];
+  for (const t of tabs) {
+    let client;
+    try {
+      client = await connect(t.id);
+      const r = await client.Runtime.evaluate({ expression: SNAPSHOT, returnByValue: true, awaitPromise: true });
+      if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
+      const s = r.result.value;
+      if (s.uid !== exclude && usesScript(s.state, scriptId) && isProtected(s.uid, s.name, protection)) found.push(`"${s.name}" (${s.uid})`);
+    } catch { unreadable.push(t.url); }
+    finally { if (client) await client.close().catch(() => {}); }
+  }
+  return { found, unreadable };
+}
+// The saved script(s) the Pine editor in this page is bound to, by its title. untitled: a new,
+// never-saved script; title null: no visible editor; error / no ids: the lookup failed.
+export const EDITOR_SCRIPT_IDS = `(async()=>{
+  let title=null;
+  for(const b of document.querySelectorAll('[class*="nameButton"]')){if(b.offsetParent!==null){title=(b.textContent||'').trim();break;}}
+  if(!title)return {title:null,ids:[]};
+  if(/^Untitled script/i.test(title))return {title,ids:[],untitled:true};
+  try{const r=await fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved',{credentials:'include'});
+    if(!r.ok)return {title,ids:[],error:'HTTP '+r.status};
+    return {title,ids:(await r.json()).filter(s=>s.scriptName===title||s.scriptTitle===title).map(s=>s.scriptIdPart)};
+  }catch(e){return {title,ids:[],error:String(e)};}
+})()`;
+// Light identity read used right before a checked tool runs.
+export const IDENTITY = `(()=>{const m=window.TradingViewApi?._chartWidgetCollection?.metaInfo;return {url:location.href,uid:m?.uid?.value()};})()`;
+export const UNCHECKABLE = 'Layouts not open in TradingView cannot be checked.';
+
+/**
+ * Which open protected charts would saving the editor's script update? `unchecked` says why the
+ * answer may be incomplete (the script or some tabs could not be read); that never refuses.
+ */
+export async function pineSaveScan(current, { active, connect, listTargets, root = ROOT }) {
+  let bound;
+  try { bound = await active.evaluateAsync(EDITOR_SCRIPT_IDS); }
+  catch (e) { return { found: [], unchecked: `the Pine editor could not be read (${e.message})` }; }
+  if (bound?.untitled) return { found: [], unchecked: null };
+  if (!bound?.title) return { found: [], unchecked: 'no Pine editor is visible, so the script could not be identified' };
+  if (bound.error || !bound.ids?.length)
+    return { found: [], unchecked: `the editor's script "${bound.title}" could not be matched to a saved script${bound.error ? ` (${bound.error})` : ''}` };
+  const found = [], unreadable = [];
+  for (const id of bound.ids) {
+    const r = await protectedChartsUsingScript(id, { connect, listTargets, root, exclude: current.uid });
+    found.push(...r.found); unreadable.push(...r.unreadable);
+  }
+  return { title: bound.title, found: [...new Set(found)],
+    unchecked: unreadable.length ? `these tabs could not be read: ${[...new Set(unreadable)].join(', ')}` : null };
+}
+
+/**
+ * Reads the layout loaded in the active tab (the shared connection the tool will use) and refuses
+ * a protected one without approval. `active` = { follow, evaluate, evaluateAsync, targetId, pin,
+ * unpin }. Returns the checked target for pinning.
+ */
+export async function chartGate(name, { layout_id, user_approved }, { active, connect, listTargets, root = ROOT }) {
+  const approved = user_approved === true;
+  if (!active || typeof active.pin !== 'function' || typeof active.unpin !== 'function')
+    throw new Error('ACTIVE_CONNECTION_UNAVAILABLE: nothing was changed.');
+  const protection = await loadProtection(root);
+  await active.follow();
+  let s;
+  try { s = await active.evaluate(SNAPSHOT); } catch (e) { s = null; if (!approved) throw new Error(`CHART_NOT_READABLE: the layout in the active tab could not be read (${e.message}), so the guard cannot tell whether it is protected. Pass user_approved: true only after the user said yes.`); }
+  const target = await active.targetId();
+  if (!target) throw new Error('ACTIVE_CONNECTION_UNAVAILABLE: the active tab could not be identified; nothing was changed.');
+  if (layout_id !== undefined && layout_id !== null && layout_id !== s?.uid)
+    throw new Error(`LAYOUT_ID_MISMATCH: the active tab has layout ${s?.uid ?? 'unknown'} loaded, not ${layout_id}; nothing was changed.`);
+  if (s && !approved && isProtected(s.uid, s.name, protection)) throw needsPermission(s);
+  let pine = null;
+  if (s && PINE_SAVE_TOOLS.has(name)) {
+    pine = await pineSaveScan(s, { active, connect, listTargets, root });
+    if (pine.found.length && !approved)
+      throw new Error(`PINE_SCRIPT_ON_PROTECTED_CHARTS: ${name} can save "${pine.title}", which also updates it on the protected charts ${pine.found.join(', ')}. Ask the user; pass user_approved: true only after they said yes. ${UNCHECKABLE}`);
+  }
+  // The tool must act on the tab and layout just checked.
+  if (s) {
+    const now = await active.evaluate(IDENTITY);
+    if (await active.targetId() !== target || now?.uid !== s.uid || now?.url !== s.url)
+      throw new Error('ACTIVE_TAB_CHANGED: the active tab or its layout changed during the check; nothing was changed. Retry.');
+  }
+  return { target, layout_id: s?.uid, name: s?.name, pine };
+}
+
+// Default-deny registration: a tool nobody has classified is disabled.
+// Install before any tool group registers. `bool` builds the user_approved schema (server.js passes
+// the repository's booleanParam). `active` gives checked tools the shared active-tab connection;
+// `connect` attaches to an explicit tab; `listTargets` lists open tabs.
+export function protectRegistrations(server, {z, connect, root=ROOT, bool, active, listTargets}) {
   const register=server.tool.bind(server);
   let queue=Promise.resolve();
   const serial = fn => { const result=queue.then(fn); queue=result.catch(()=>{}); return result; };
@@ -331,6 +312,7 @@ export function protectRegistrations(server, {z, connect, root=ROOT, bool}) {
   const error=e=>({...result({success:false,error:e.message}),isError:true});
   const optional = t => (t && typeof t.optional === 'function') ? t.optional() : t;
   const approval = () => (typeof bool === 'function' ? bool() : typeof z.boolean === 'function' ? z.boolean() : z.string());
+  const follow = async () => { try { await active?.follow(); } catch { /* the tool's own connect reports errors */ } };
   server.tool=(...registration)=>{
     const [name,description,schema,handler]=registration;
     // Only the plain (name, description, shape, handler) form is understood; anything else could
@@ -339,54 +321,58 @@ export function protectRegistrations(server, {z, connect, root=ROOT, bool}) {
         !schema || typeof schema!=='object' || typeof handler!=='function')
       throw new Error(`UNSUPPORTED_REGISTRATION: ${String(name)} must be registered as (name, description, shape, handler).`);
     if (Object.hasOwn(GUARD_TOOLS, name)) throw new Error(`RESERVED_TOOL_NAME: ${name} belongs to the layout guard.`);
-    if(READ_TOOLS.has(name)) {
-      const check=READ_ARGUMENT_GUARDS[name];
-      return register(name,description+(READ_ARGUMENT_NOTES[name]||''),schema,(...args)=>serial(()=>{
-        const refusal=check?.(args[0]);
-        return refusal ? error(new Error(refusal)) : handler(...args);
-      }));
+    // Read and account tools follow the tab the user is looking at, then run as they are.
+    if(READ_TOOLS.has(name) || ACCOUNT_TOOLS.has(name))
+      return register(name,description,schema,(...args)=>serial(async()=>{await follow();return handler(...args);}));
+    if(CHART_TOOLS.has(name)) {
+      for (const key of ['layout_id','user_approved']) if (Object.hasOwn(schema,key)) throw new Error(`UNSUPPORTED_REGISTRATION: ${name} already has ${key}.`);
+      return register(name,description+CHECKED_NOTE,{...schema,layout_id:optional(z.string()),user_approved:optional(approval())},
+        (args,...rest)=>serial(async()=>{
+          const {layout_id,user_approved,...toolArgs}=args||{};
+          let gate;
+          try { gate=await chartGate(name,{layout_id,user_approved},{active,connect,listTargets,root}); }
+          catch(e){ return error(e); }
+          // Pin the shared connection to the checked tab: a reconnect while the tool runs can then
+          // only reach that tab, or fail.
+          try {
+            active.pin(gate.target);
+            const res=await handler(toolArgs,...rest);
+            const pine=gate.pine;
+            if (!pine || (!pine.found.length && !pine.unchecked) || !Array.isArray(res?.content)) return res;
+            return {...res,content:[...res.content,{type:'text',text:JSON.stringify({layout_guard:{
+              also_updates_open_protected_charts:pine.found,...(pine.unchecked?{could_not_check:pine.unchecked}:{}),note:UNCHECKABLE}})}]};
+          } finally { active.unpin(); }
+        }));
     }
-    if(WRITE_TOOLS.has(name)) return register(name,description+WRITE_NOTE+(name==='ui_evaluate'?UI_EVALUATE_NOTE:''),
-      {...schema,target_id:z.string(),layout_id:z.string(),user_approved:optional(approval())},
-      args=>serial(async()=>{try{return result(await guardedWrite({...args,tool:name,args},{connect,root}));}catch(e){return error(e);}}));
     return register(name,description+DISABLED_MARK,schema,
-      async()=>error(new Error('UNSAFE_OPERATION_DISABLED: this tool cannot prove which layout it acts on. Use the target-bound tools instead.')));
+      async()=>error(new Error('UNSAFE_OPERATION_DISABLED: this tool has not been reviewed by the layout guard (src/layout-safety.js).')));
   };
   // registerTool() would bypass the wrapper above; nothing in this repository uses it.
   server.registerTool=name=>{ throw new Error(`UNSUPPORTED_REGISTRATION: ${String(name)} must use server.tool so the layout guard can classify it.`); };
-  const inspectRead = (expression) => async args => serial(async()=>{
+
+  // Read-only tools on an explicit tab (target_id from tab_list). Optional layout_id must match the
+  // layout loaded there.
+  const onTab = (expression) => async args => serial(async()=>{
     let client;
     try {
       client=await connect(args.target_id);
       const run=async e=>{const r=await client.Runtime.evaluate({expression:e,returnByValue:true,awaitPromise:true});
         if(r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);return r.result.value;};
       const s=await run(SNAPSHOT);
-      checkIdentity(s,args.layout_id);
-      return result({layout_id:s.uid,name:s.name,...(await run(expression(args)))});
+      if (args.layout_id && args.layout_id!==s.uid) throw new Error(`LAYOUT_ID_MISMATCH: tab ${args.target_id} has layout ${s.uid} loaded, not ${args.layout_id}.`);
+      return result({target_id:args.target_id,layout_id:s.uid,name:s.name,...(await expression(s,args,run))});
     }catch(e){return error(e);}finally{if(client) await client.close();}
   });
-  register('layout_safety_inspect','Read the actual layout on an explicit tab (target_id from tab_list): its ID, name, sections and whether it is one of the user\'s real charts. Does not change charts.',
-    {target_id:z.string(),layout_id:z.string()}, args=>serial(async()=>{
-      let client;
-      try {
-        client=await connect(args.target_id);
-        const r=await client.Runtime.evaluate({expression:SNAPSHOT,returnByValue:true});
-        if(r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
-        const s=r.result.value;
-        checkIdentity(s,args.layout_id);
-        let protection, protection_error;
-        try { protection=await loadProtection(root); } catch(e) { protection_error=e.message; }
-        return result({target_id:args.target_id,layout_id:s.uid,chart_id:s.chartId,name:s.name,
-          real_chart:protection ? isRealChart(s.uid,s.name,await scratchLayouts(root),protection) : true,
-          ...(protection ? {protected:isProtected(s.uid,s.name,protection)} : {protection_error}),state_hash:hash(s.state),
-          sections:s.state.charts.map(c=>({chart_id:c.chartId,panes:c.panes.length}))});
-      }catch(e){return error(e);}finally{if(client) await client.close();}
+  const tab={target_id:z.string(),layout_id:optional(z.string())};
+  register('layout_safety_inspect','Read which layout is actually loaded in a tab (target_id from tab_list): its ID, name, URL, sections and whether it is protected. Read-only.',
+    tab, onTab(async s=>{
+      let protection, protection_error;
+      try { protection=await loadProtection(root); } catch(e) { protection_error=e.message; }
+      return {url:s.url,chart_id:s.chartId,...(protection?{protected:isProtected(s.uid,s.name,protection)}:{protection_error}),
+        state_hash:hash(s.state),sections:s.state.charts.map(c=>({chart_id:c.chartId,panes:c.panes.length}))};
     }));
-  register('study_inputs_get','Read every input (id, title, value) of a study on an explicit tab and layout. Read-only; any chart.',
-    {target_id:z.string(),layout_id:z.string(),entity_id:z.string()}, inspectRead(a=>STUDY_INPUTS(a.entity_id)));
-  register('strategy_trades_get','Read a strategy study\'s closed trades (entry/exit time, bar, price, quantity) on an explicit tab and layout. Read-only; any chart.',
-    {target_id:z.string(),layout_id:z.string(),entity_id:z.string()}, inspectRead(a=>STRATEGY_TRADES(a.entity_id)));
-  register('scratch_layout_create','Create a new empty chart layout in the given tab and record it as a scratch chart (changes there need no permission). The chart that was showing in the tab is not changed, but it leaves the tab: if it is one of the user\'s real charts, pass user_approved: true only after the user said yes.',
-    {target_id:z.string(),layout_id:z.string(),name:optional(z.string()),user_approved:optional(approval())},
-    args=>serial(async()=>{try{return result(await createScratch(args,{connect,root}));}catch(e){return error(e);}}));
+  register('study_inputs_get','Read every input (id, title, value) of a study in a tab (target_id from tab_list). Read-only; any chart.',
+    {...tab,entity_id:z.string()}, onTab((s,a,run)=>run(STUDY_INPUTS(a.entity_id))));
+  register('strategy_trades_get','Read a strategy study\'s closed trades (entry/exit time, bar, price, quantity) in a tab (target_id from tab_list). Read-only; any chart.',
+    {...tab,entity_id:z.string()}, onTab((s,a,run)=>run(STRATEGY_TRADES(a.entity_id))));
 }

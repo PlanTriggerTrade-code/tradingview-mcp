@@ -1,8 +1,11 @@
-import { SNAPSHOT, validate, backup, withLock, hash, ROOT, guardedExpression, verifyPreserved, isRealChart, scratchLayouts, loadProtection } from './layout-safety.js';
+import { SNAPSHOT, validate, backup, withLock, hash, ROOT, guardedExpression, verifyPreserved, loadProtection, protectedChartsUsingScript, UNCHECKABLE } from './layout-safety.js';
+// Saving a script updates its instances on every layout TradingView has open (observed: an open
+// second layout's instance moved to the new version right after a save); see
+// protectedChartsUsingScript.
+export { usesScript, protectedChartsUsingScript } from './layout-safety.js';
 import { FIND_MONACO, OPEN_EDITOR, CLICK_PINE_BUTTON } from './core/pine.js';
-// Pine edits compile by adding the script to the chart: on one of the user's real charts that
-// needs the user's yes (user_approved); scratch charts need none.
-async function permitted(root,s,args,prot){if(isRealChart(s.uid,s.name,await scratchLayouts(root),prot)&&args.user_approved!==true)throw Error(`REAL_CHART_NEEDS_PERMISSION: "${s.name}" (${s.uid}) is one of the user's charts; use a scratch chart (scratch_layout_create) or pass user_approved after the user said yes.`);}
+// Pine edits compile by adding the script to the chart: on a protected chart that needs the
+// user's yes (user_approved), checked by validate().
 
 // The Pine editor the user can see. TradingView keeps several Monaco copies in the page (hidden
 // ones from earlier scripts, detached ones without a React fiber): FIND_MONACO from core/pine.js
@@ -45,35 +48,6 @@ async function remoteScript(run,id) {
  })()`);
 }
 
-// Saving a script updates its instances on every layout TradingView has open, not just this one
-// (observed: an open second layout's instance moved to the new version right after a save).
-// A study uses the script when its state carries the script ID as pineId / scriptIdPart.
-export function usesScript(value,scriptId) {
- if(!value||typeof value!=='object')return false;
- for(const [k,v] of Object.entries(value)){
-  if((k==='pineId'||k==='scriptIdPart')&&v===scriptId)return true;
-  if(v&&typeof v==='object'&&usesScript(v,scriptId))return true;
- }
- return false;
-}
-// Reads every open chart tab (read-only SNAPSHOT) and names the user's real charts that use the
-// script. A tab that cannot be read is named too (fail closed). Layouts that are not open in
-// TradingView cannot be checked.
-export async function realChartsUsingScript(scriptId,{connect,listTargets,root=ROOT}) {
- if(typeof listTargets!=='function')throw Error('OPEN_LAYOUTS_UNCHECKED: cannot list the open TradingView tabs; no write performed.');
- const scratch=await scratchLayouts(root),prot=await loadProtection(root);
- const tabs=(await listTargets()).filter(t=>(t.type==='page'||t.type==='webview')&&/tradingview\.com\/chart/i.test(t.url||''));
- const found=[];
- for(const t of tabs){
-  let client;
-  try{client=await connect(t.id);const s=await runner(client,SNAPSHOT);
-   if(usesScript(s.state,scriptId)&&isRealChart(s.uid,s.name,scratch,prot))found.push(`"${s.name}" (${s.uid})`);
-  }catch{found.push(`unreadable tab ${t.url}`);}
-  finally{if(client)await client.close().catch(()=>{});}
- }
- return found;
-}
-
 export async function updatePine(args,deps) {
  const root=deps.root||ROOT;
  const prot=await loadProtection(root);
@@ -81,11 +55,11 @@ export async function updatePine(args,deps) {
   const client=await deps.connect(args.target_id);const run=e=>runner(client,e);
   let backupPath;
   try {
-   let before=await run(SNAPSHOT);validate(before,args,{protection:prot});await permitted(root,before,args,prot);
+   let before=await run(SNAPSHOT);validate(before,args,{protection:prot,approved:args.user_approved===true});
    // Deliberately limited to an explicitly designated single-chart development layout.
    if(args.development!==true || before.state.layout!=='s' || before.state.charts.length!==1) throw Error('DEDICATED_DEVELOPMENT_LAYOUT_REQUIRED');
-   const onRealCharts=await realChartsUsingScript(args.script_id,{connect:deps.connect,listTargets:deps.listTargets,root});
-   if(onRealCharts.length&&args.user_approved!==true)throw Error(`PINE_SCRIPT_ON_REAL_CHARTS: saving ${args.script_id} also updates it on the user's charts ${onRealCharts.join(', ')}. Ask the user; pass user_approved: true only after they said yes. Layouts not open in TradingView cannot be checked.`);
+   const others=await protectedChartsUsingScript(args.script_id,{connect:deps.connect,listTargets:deps.listTargets,root,exclude:before.uid});
+   if(others.found.length&&args.user_approved!==true)throw Error(`PINE_SCRIPT_ON_PROTECTED_CHARTS: saving ${args.script_id} also updates it on the protected charts ${others.found.join(', ')}. Ask the user; pass user_approved: true only after they said yes. ${UNCHECKABLE}`);
    if(await run(`[...document.querySelectorAll('[role="dialog"]')].some(e=>e.dataset.name!=='open-user-script-dialog')`))throw Error('PINE_DIALOG_OPEN: finish loading before update');
    const editor=await run(EDITOR_STATE);const remote=await remoteScript(run,args.script_id);
    if(String(remote.version)!==args.expected_version)throw Error('PINE_CLOUD_VERSION_CHANGED');
@@ -94,12 +68,12 @@ export async function updatePine(args,deps) {
    const checkEditor=`const m=${EDITOR};if(!m||m.editor.getValue()!==${q(editor.source)}||document.querySelector('[data-qa-id="pine-script-title-button"]')?.innerText?.trim()!==${q(editor.title)})throw Error('PINE_EDITOR_CHANGED');`;
    await run(guardedExpression(before,`${checkEditor} document.querySelector('[data-name="open-user-script-dialog"] [data-qa-id="close"]')?.click();m.editor.setValue(${q(args.source)});`));
    // Save through the Pine toolbar first; never depend on an unsaved-add confirmation.
-   const preSave=await run(SNAPSHOT);validate(preSave,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot});
+   const preSave=await run(SNAPSHOT);validate(preSave,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot,approved:args.user_approved===true});
    await run(guardedExpression(preSave,`const m=${EDITOR};if(m?.editor.getValue()!==${q(args.source)}||document.querySelector('[data-qa-id="pine-script-title-button"]')?.innerText?.trim()!==${q(editor.title)})throw Error('PINE_EDITOR_CHANGED');const b=document.querySelector('[data-qa-id="pine-script-save-button"]');if(!b)throw Error('PINE_SAVE_BUTTON_UNAVAILABLE');if(!b.disabled)b.click();`));
    let cloud;
    for(let i=0;i<100;i++){await (deps.delay||delay)(500);cloud=await remoteScript(run,args.script_id);if(canonicalSource(cloud.source)===canonicalSource(args.source))break;if(i===99)throw Error('PINE_CLOUD_SAVE_NOT_CONFIRMED');}
    // No global keyboard shortcut or generic Save button. Recheck layout and editor before compiling.
-   before=await run(SNAPSHOT);validate(before,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot});
+   before=await run(SNAPSHOT);validate(before,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot,approved:args.user_approved===true});
    await run(guardedExpression(before,`const m=${EDITOR};if(m?.editor.getValue()!==${q(args.source)})throw Error('PINE_SOURCE_CHANGED');
     const pending=[...document.querySelectorAll('[data-qa-id="no-btn"]')].filter(b=>b.parentElement?.parentElement?.textContent.includes("Save this script before adding?"));if(pending.length>1)throw Error('AMBIGUOUS_PINE_CONFIRMATION');pending[0]?.click();m.editor.focus();
     const action=m.editor.getSupportedActions().find(x=>x.id.endsWith(':add.to.chart'));
@@ -109,7 +83,7 @@ export async function updatePine(args,deps) {
     await (deps.delay||delay)(500);
     status=await run(EDITOR_STATE);
     if(status?.errors?.length)throw Error('PINE_COMPILE_ERRORS: '+JSON.stringify(status.errors));
-    after=await run(SNAPSHOT);validate(after,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot});
+    after=await run(SNAPSHOT);validate(after,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot,approved:args.user_approved===true});
     const studies=await run(`(()=>{const c=window.TradingViewApi._activeChartWidgetWV.value();return c.getAllStudies().map(s=>({...s,inputs:c.getStudyById(s.id).study().metaInfo().inputs.map(i=>i.name)}));})()`);
     if(studies.some(s=>s.name===titleOf(args.source) && args.expected_input_titles.every(t=>s.inputs.includes(t))) && i>=5)break;
     if(i===99)throw Error('PINE_COMPILE_NOT_CONFIRMED');
@@ -121,11 +95,13 @@ export async function updatePine(args,deps) {
     if(canonicalSource(saved.source)===canonicalSource(args.source))break;
     if(i===19)throw Error('PINE_CLOUD_SAVE_NOT_CONFIRMED');
    }
-   const final=await run(SNAPSHOT);validate(final,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot});
+   const final=await run(SNAPSHOT);validate(final,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot,approved:args.user_approved===true});
    verifyPreserved(before,final);
    await backup(root,{...final,pine:{source:args.source,script_id:args.script_id,version:saved.version}},'pine_development_update:after');
    return {success:true,saved:true,script_id:args.script_id,version:saved.version,backup:backupPath,layout_id:final.uid,
-    source_hash:hash(args.source),note:'Cloud source verified with CRLF/LF normalization; production chart instances were not upgraded.'};
+    source_hash:hash(args.source),also_updates_open_protected_charts:others.found,
+    ...(others.unreadable.length?{could_not_check:others.unreadable}:{}),
+    note:`Cloud source verified with CRLF/LF normalization. Open layouts that use the script may move to the new version. ${UNCHECKABLE}`};
   }catch(e){throw Error(e.message+(backupPath?` Backup: ${backupPath}. Inspect before retrying.`:''));}
   finally{await client.close();}
  }));
@@ -137,15 +113,14 @@ export function registerPineDevelopment(server,{z,connect,listTargets,root=ROOT,
  const fail=e=>({...ok({success:false,error:e.message}),isError:true});
  const approval=typeof bool==='function'?bool():typeof z.boolean==='function'?z.boolean():undefined;
  const identity={target_id:z.string(),layout_id:z.string(),...(approval?{user_approved:approval.optional()}:{})};
- server.tool('pine_development_open','Open an existing unprotected saved layout in a NEW tab for development; never reuses the current tab.',{layout_id:z.string(),source_target_id:z.string(),source_layout_id:z.string()},async args=>{
+ server.tool('pine_development_open','Open an existing saved layout in a NEW tab for development; never reuses the current tab.',{layout_id:z.string(),source_target_id:z.string(),source_layout_id:z.string()},async args=>{
   try {
-   const prot=await loadProtection(root);
-   if(!/^[A-Za-z0-9_-]+$/.test(args.layout_id)||prot.ids.has(args.layout_id))throw Error('PROTECTED_OR_INVALID_LAYOUT');
+   if(!/^[A-Za-z0-9_-]+$/.test(args.layout_id))throw Error('INVALID_LAYOUT_ID');
    const url='https://www.tradingview.com/chart/'+args.layout_id+'/';
    const oldIds=new Set((await listTargets()).map(t=>t.id));
    await withLock(root,args.source_layout_id,async()=>{
     const source=await connect(args.source_target_id);
-    try{const state=await runner(source,SNAPSHOT);validate(state,{layout_id:args.source_layout_id},{protection:prot});
+    try{const state=await runner(source,SNAPSHOT);validate(state,{layout_id:args.source_layout_id},{writable:false});
      await backup(root,state,'pine_development_open:source');
      await runner(source,guardedExpression(state,`window.open(${q(url)},'_blank','noopener');`));
     }finally{await source.close();}
@@ -157,16 +132,16 @@ export function registerPineDevelopment(server,{z,connect,listTargets,root=ROOT,
    const client=await connect(target.id);
    try {for(let i=0;i<40;i++){
     let s;try{s=await runner(client,SNAPSHOT);}catch(e){if(i===39)throw e;await delay(500);continue;}
-    validate(s,args,{protection:prot});if(s.state.layout!=='s'||s.state.charts.length!==1)throw Error('DEDICATED_DEVELOPMENT_LAYOUT_REQUIRED');
+    validate(s,args,{writable:false});if(s.state.layout!=='s'||s.state.charts.length!==1)throw Error('DEDICATED_DEVELOPMENT_LAYOUT_REQUIRED');
     return ok({target_id:target.id,layout_id:s.uid,chart_id:s.chartId,state_hash:hash(s.state)});
    }}finally{await client.close();}
   }catch(e){return fail(e);}
  });
- server.tool('pine_development_inspect','Inspect/open the Pine panel on an explicit unprotected development layout. Returns editor hash and saved script IDs.',identity,async args=>{
+ server.tool('pine_development_inspect','Inspect/open the Pine panel on an explicit development layout. Returns editor hash and saved script IDs. On a protected chart pass user_approved: true only after the user said yes.',identity,async args=>{
   try{const prot=await loadProtection(root);return await withLock(root,args.layout_id,async()=>{
    const client=await connect(args.target_id);const run=e=>runner(client,e);
    try{
-    const s=await run(SNAPSHOT);validate(s,args,{protection:prot});await permitted(root,s,args,prot);
+    const s=await run(SNAPSHOT);validate(s,args,{protection:prot,approved:args.user_approved===true});
     if(s.state.layout!=='s'||s.state.charts.length!==1)throw Error('DEDICATED_DEVELOPMENT_LAYOUT_REQUIRED');
     await backup(root,s,'pine_development_inspect');
     if(!await run(EDITOR_STATE)){
@@ -175,21 +150,21 @@ export function registerPineDevelopment(server,{z,connect,listTargets,root=ROOT,
     }
     // Up to 30s: the first open after TradingView starts can take well over 10s (9dd3d15).
     let editor;for(let i=0;i<100;i++){editor=await run(EDITOR_STATE);if(editor)break;await delay(300);}
-    const final=await run(SNAPSHOT);validate(final,args,{protection:prot});
+    const final=await run(SNAPSHOT);validate(final,args,{protection:prot,approved:args.user_approved===true});
     const scripts=await run(`fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved',{credentials:'include'}).then(r=>r.json()).then(a=>a.map(s=>({id:s.scriptIdPart,name:s.scriptName,title:s.scriptTitle,version:s.version})))`);
     return ok({target_id:args.target_id,layout_id:final.uid,chart_id:final.chartId,state_hash:hash(final.state),
      editor:editor?{title:editor.title,source_hash:hash(editor.source),script_title:titleOf(editor.source),errors:editor.errors,actions:editor.actions.filter(x=>x.startsWith('vs.editor'))}:null,scripts, diagnostics:await run(`(()=>{const c=window.TradingViewApi._activeChartWidgetWV.value();return {studies:c.getAllStudies().map(s=>({...s,inputs:c.getStudyById(s.id).study().metaInfo().inputs.filter(i=>!i.isHidden).slice(0,8).map(i=>({id:i.id,name:i.name}))}))};})()`)});
    }finally{await client.close();}
   });}catch(e){return fail(e);}
  });
- server.tool('pine_development_load','Open an exact saved script through the real Pine picker, preserving its editor binding.',{...identity,script_id:z.string()},async args=>{
+ server.tool('pine_development_load','Open an exact saved script through the real Pine picker, preserving its editor binding. On a protected chart pass user_approved: true only after the user said yes.',{...identity,script_id:z.string()},async args=>{
   try{const prot=await loadProtection(root);return await withLock(root,args.layout_id,async()=>{const client=await connect(args.target_id);const run=e=>runner(client,e);
-   try{const s=await run(SNAPSHOT);validate(s,args,{protection:prot});await permitted(root,s,args,prot);if(s.state.layout!=='s'||s.state.charts.length!==1)throw Error('DEDICATED_DEVELOPMENT_LAYOUT_REQUIRED');
+   try{const s=await run(SNAPSHOT);validate(s,args,{protection:prot,approved:args.user_approved===true});if(s.state.layout!=='s'||s.state.charts.length!==1)throw Error('DEDICATED_DEVELOPMENT_LAYOUT_REQUIRED');
     const remote=await remoteScript(run,args.script_id);
     await backup(root,{...s,pine:await run(EDITOR_STATE)},'pine_development_load');
     await run(guardedExpression(s,`if(!document.querySelector('[data-name="open-user-script-dialog"]')){const m=${EDITOR};const a=m?.editor.getSupportedActions().find(x=>x.id.endsWith(':open.script'));if(!a)throw Error('PINE_OPEN_ACTION_UNAVAILABLE');await a.run();}`));
     await delay(700);
-    const current=await run(SNAPSHOT);validate(current,args,{protection:prot});
+    const current=await run(SNAPSHOT);validate(current,args,{protection:prot,approved:args.user_approved===true});
     await run(guardedExpression(current,`const name=${q(remote.scriptName||remote.scriptTitle)},dlg='[data-name="open-user-script-dialog"]';
      const find=()=>[...document.querySelectorAll(dlg+' [data-name="open-script-dialog-item-name"]')].filter(e=>e.textContent.trim()===name);
      let rows=find();
@@ -201,9 +176,9 @@ export function registerPineDevelopment(server,{z,connect,listTargets,root=ROOT,
      if(rows.length!==1)throw Error('EXACT_SCRIPT_ROW_NOT_VISIBLE');rows[0].parentElement.click();`));
     let editor;for(let i=0;i<30;i++){await delay(300);editor=await run(EDITOR_STATE);if(editor?.source?.replace(/\r\n/g,'\n')===remote.source.replace(/\r\n/g,'\n'))break;}
     assertEditor(editor,remote,hash(editor?.source),remote.source);
-    const loaded=await run(SNAPSHOT);validate(loaded,args,{protection:prot});
+    const loaded=await run(SNAPSHOT);validate(loaded,args,{protection:prot,approved:args.user_approved===true});
     await run(guardedExpression(loaded,`document.querySelector('[data-name="open-user-script-dialog"] [data-qa-id="close"]')?.click();`));
-    const final=await run(SNAPSHOT);validate(final,args,{protection:prot});verifyPreserved(s,final);
+    const final=await run(SNAPSHOT);validate(final,args,{protection:prot,approved:args.user_approved===true});verifyPreserved(s,final);
     return ok({target_id:args.target_id,layout_id:final.uid,chart_id:final.chartId,state_hash:hash(final.state),source_hash:hash(editor.source),script_id:args.script_id,title:editor.title});
    }finally{await client.close();}});}catch(e){return fail(e);}
  });
@@ -215,7 +190,7 @@ export function registerPineDevelopment(server,{z,connect,listTargets,root=ROOT,
     trial_fields:['Long trial ID','Short trial ID'].filter(t=>remote.source.includes('"'+t+'"'))});
   }catch(e){return fail(e);}finally{if(client)await client.close();}
  });
- server.tool('pine_development_update','Back up, update, compile and save an existing Pine script on a verified development layout; verify cloud source readback. Saving also updates the script on other open layouts: if one of the user\'s real charts uses it, pass user_approved: true only after the user said yes.',
+ server.tool('pine_development_update','Back up, update, compile and save an existing Pine script on a verified development layout; verify cloud source readback. On a protected chart, or when an open protected chart uses the script (saving updates it there too), pass user_approved: true only after the user said yes.',
   {...identity,chart_id:z.string(),state_hash:z.string(),source_hash:z.string(),expected_version:z.string(),script_id:z.string(),source:z.string(),expected_input_titles:z.array(z.string()).min(1),development:z.literal(true)},
   async args=>{try{return ok(await updatePine(args,{connect,listTargets,root}));}catch(e){return fail(e);}});
 }

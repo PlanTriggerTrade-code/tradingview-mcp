@@ -88,7 +88,21 @@ export function requireFinite(value, name) {
   return n;
 }
 
+// While a chart-bound tool runs, the layout guard pins the tab it checked. The shared connection
+// may then only (re)connect to that target: a reconnect after a slow ping or a timed-out evaluate
+// must never land on whatever tab happens to be active, and fails instead.
+let pinned = null;
+export function pinTarget(id) {
+  if (!id) throw new Error('pinTarget: a target id is required');
+  pinned = id;
+}
+export function unpinTarget() { pinned = null; }
+export function pinnedTarget() { return pinned; }
+
 export async function getClient() {
+  if (client && pinned && targetInfo?.id !== pinned) {
+    throw new Error(`TARGET_PINNED: the connection is attached to ${targetInfo?.id}, not the checked tab ${pinned}; nothing was done.`);
+  }
   if (client) {
     try {
       // Quick liveness check
@@ -103,7 +117,7 @@ export async function getClient() {
       targetInfo = null;
     }
   }
-  return connect();
+  return connect(pinned);
 }
 
 // Which TradingView tab is the user looking at? TradingView Desktop draws its
@@ -175,6 +189,7 @@ async function adopt(c, target) {
  * per evaluate(), so a multi-step tool never straddles two tabs.
  */
 export async function followActiveTab() {
+  if (pinned) return; // a chart-bound tool is running on the checked tab
   if (!client) return; // the first connect() already picks the active tab
   let active, page;
   try { active = await getActiveShellTab(); } catch { return; }
@@ -188,6 +203,9 @@ export async function followActiveTab() {
 }
 
 export async function connect(targetId = null) {
+  if (pinned && targetId !== pinned) {
+    throw new Error(`TARGET_PINNED: only the checked tab ${pinned} may be used while a chart-bound tool runs; nothing was done.`);
+  }
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {

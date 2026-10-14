@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
-import { validate, hash, withLock, guardedWrite, guardedExpression, protectRegistrations, verifyPreserved, EMPTY_PROTECTION } from '../src/layout-safety.js';
+import { validate, withLock, guardedExpression, protectRegistrations, verifyPreserved, EMPTY_PROTECTION } from '../src/layout-safety.js';
 
 // Made-up protection list (the real one is the user's own state/protected-layouts.json).
 const protection={ids:new Set(['prot0001']),patterns:[/do[\s_.-]*not[\s_.-]*touch/i],layouts:[]};
@@ -17,9 +17,10 @@ test('a URL showing another layout than the one loaded does not authorize writes
   const s=fixture();s.uid='prot0001';s.url='https://www.tradingview.com/chart/other001/';
   assert.throws(()=>validate(s,{layout_id:'other001'},{protection}),/IDENTITY_MISMATCH/);
 });
-test('a protected ID survives rename and matching URL',()=>{
+test('a protected ID survives rename and needs approval',()=>{
   const s=fixture();s.uid='prot0001';s.name='Renamed';s.url='https://www.tradingview.com/chart/prot0001/';
-  assert.throws(()=>validate(s,{layout_id:s.uid},{protection}),/PROTECTED_MANUAL/);
+  assert.throws(()=>validate(s,{layout_id:s.uid},{protection}),/PROTECTED_CHART_NEEDS_PERMISSION/);
+  assert.doesNotThrow(()=>validate(s,{layout_id:s.uid},{protection,approved:true}));
 });
 test('writable checks refuse when no protection list was loaded',()=>{
   const s=fixture();
@@ -56,25 +57,25 @@ test('collapsing layout, removing sources or changing siblings is detected',()=>
   after=structuredClone(before);after.state.charts[0].panes[0].sources.pop();assert.throws(()=>verifyPreserved(before,after),/SOURCE_REMOVED/);
   after=structuredClone(before);after.state.charts[1].panes[0].sources[0].state.symbol='NQ';assert.throws(()=>verifyPreserved(before,after),/UNRELATED_SECTION/);
 });
-test('raw JS, save, UI, bulk and future tools cannot call original handlers',async()=>{
+test('checked tools without a shared connection and unreviewed tools cannot call original handlers',async()=>{
   const handlers=new Map();const server={tool:(n,d,s,h)=>handlers.set(n,h)};let calls=0,connects=0;
   protectRegistrations(server,{z:{string:()=>({})},connect:async()=>{connects++;assert.fail('connected');}});
-  const target={target_id:'t',layout_id:'scr12345',expression:'1'};
-  // Raw JS is refused for want of the user's yes, before any connection, even with a valid target.
-  server.tool('ui_evaluate','',{},async()=>calls++);
-  const raw=await handlers.get('ui_evaluate')(target);
-  assert.equal(raw.isError,true);assert.match(raw.content[0].text,/UI_EVALUATE_NEEDS_PERMISSION/);
-  for(const n of ['ui_keyboard','pane_set_layout','session_save','pine_compile','new_future_writer']){
+  // Tools that may change a chart cannot run when the layout in the tab cannot be checked.
+  for(const n of ['ui_evaluate','ui_click','draw_clear','pane_set_layout','pine_compile']){
     server.tool(n,'',{},async()=>calls++);
-    const r=await handlers.get(n)(target);
-    assert.equal(r.isError,true);assert.match(r.content[0].text,/UNSAFE_OPERATION_DISABLED/);
+    const r=await handlers.get(n)({expression:'1'});
+    assert.equal(r.isError,true);assert.match(r.content[0].text,/ACTIVE_CONNECTION_UNAVAILABLE/);
   }
+  // A tool nobody has reviewed stays disabled.
+  server.tool('new_future_writer','',{},async()=>calls++);
+  const r=await handlers.get('new_future_writer')({});
+  assert.equal(r.isError,true);assert.match(r.content[0].text,/UNSAFE_OPERATION_DISABLED/);
   assert.equal(calls,0);assert.equal(connects,0);
 });
 test('protected name patterns match case-insensitively with any separator',()=>{
   for(const name of ['Do Not Touch','DO_NOT_TOUCH','do-not-touch','Do.Not.Touch','DoNotTouch','do  not  touch']){
     const s=fixture();s.name=name;
-    assert.throws(()=>validate(s,{layout_id:s.uid},{protection}),/PROTECTED_MANUAL/,name);
+    assert.throws(()=>validate(s,{layout_id:s.uid},{protection}),/PROTECTED_CHART_NEEDS_PERMISSION/,name);
   }
 });
 test('read-only tools retain original handlers',async()=>{

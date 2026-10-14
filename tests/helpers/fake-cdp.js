@@ -1,7 +1,8 @@
 /**
- * A fake Chrome DevTools endpoint for tests: HTTP /json/* plus a WebSocket that answers CDP
- * commands and records every one. It listens on a random local port, so tools aimed at it can
- * never reach a running TradingView. Uses `ws`, which chrome-remote-interface already depends on.
+ * A fake Chrome DevTools endpoint for tests: HTTP /json/* plus a WebSocket per page target that
+ * answers CDP commands and records every one. It listens on a random local port, so tools aimed at
+ * it can never reach a running TradingView. Uses `ws`, which chrome-remote-interface already
+ * depends on.
  */
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -14,16 +15,19 @@ const PROTOCOL = readFileSync(require.resolve('chrome-remote-interface/lib/proto
 export const FAKE_CHART_URL = 'https://www.tradingview.com/chart/fake1234/';
 
 /**
- * respond(expression) decides what Runtime.evaluate returns (a value, or undefined).
- * Returns { port, log, close } where log holds { kind: 'http'|'cdp'|'evaluate', ... } entries.
+ * Options:
+ *   targets: [{ id, url }] page targets (default: one chart page "page1")
+ *   respond(expression, targetId): what Runtime.evaluate returns (a value, or undefined)
+ *   hang(expression, targetId): true to never answer that evaluate (a frozen renderer)
+ * Returns { port, log, close }; log holds { kind: 'http'|'cdp'|'evaluate', target, ... } entries.
  */
-export async function startFakeCdp({ respond = () => undefined } = {}) {
+export async function startFakeCdp({ respond = () => undefined, targets: pages = [{ id: 'page1', url: FAKE_CHART_URL }], hang = () => false } = {}) {
   const log = [];
   let port;
-  const targets = () => [{
-    id: 'page1', type: 'page', title: 'Fake chart', url: FAKE_CHART_URL,
-    webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/page1`,
-  }];
+  const targets = () => pages.map(p => ({
+    id: p.id, type: 'page', title: 'Fake ' + p.id, url: p.url,
+    webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${p.id}`,
+  }));
   const http = createServer((req, res) => {
     log.push({ kind: 'http', path: req.url });
     const json = (body) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
@@ -33,15 +37,17 @@ export async function startFakeCdp({ respond = () => undefined } = {}) {
     res.writeHead(404); res.end('not supported by the fake');
   });
   const wss = new WebSocket.Server({ server: http });
-  wss.on('connection', (socket) => {
+  wss.on('connection', (socket, req) => {
+    const target = String(req.url || '').split('/').pop();
     socket.on('message', (data) => {
       const msg = JSON.parse(data);
-      log.push({ kind: 'cdp', method: msg.method, params: msg.params });
+      log.push({ kind: 'cdp', target, method: msg.method, params: msg.params });
       let reply;
       if (msg.method === 'Runtime.evaluate') {
         const expression = msg.params?.expression ?? '';
-        log.push({ kind: 'evaluate', expression });
-        const value = expression.trim() === '1' ? 1 : respond(expression);
+        log.push({ kind: 'evaluate', target, expression });
+        if (hang(expression, target)) return;
+        const value = expression.trim() === '1' ? 1 : respond(expression, target);
         reply = { result: value === undefined ? { type: 'undefined' } : { type: typeof value, value } };
       } else if (msg.method === 'Page.captureScreenshot') {
         socket.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: 'fake: no screenshots' } }));

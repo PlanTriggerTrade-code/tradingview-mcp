@@ -13,8 +13,9 @@ import { z } from 'zod';
 import { startFakeCdp } from './helpers/fake-cdp.js';
 
 // Expressions answering these keep the core functions going past their existence checks.
+// The Pine editor counts as found, so the Pine read tools go past their panel-opening wait.
 const fake = await startFakeCdp({
-  respond: (e) => (/^\s*typeof \(/.test(e) ? true : undefined),
+  respond: (e) => (/^\s*typeof \(/.test(e) || (e.includes('findMonacoEditor') && /!==\s*null/.test(e)) ? true : undefined),
 });
 process.env.TV_CDP_HOST = '127.0.0.1';
 process.env.TV_CDP_PORT = String(fake.port);
@@ -36,7 +37,7 @@ const groups = await Promise.all(['health', 'chart', 'pine', 'data', 'capture', 
 }));
 
 // Calls and expressions that change TradingView. Anything matching fails the read class.
-const WRITE_EXPRESSION = /\b(setSymbol|setResolution|createStudy|removeEntity|setInputValues|executeActionById|saveChartToServer|loadChartFromServer|createNewLayout|removeAllStudies|setVisible|applyStudyTemplate|removeAllShapes|createShape|createMultipointShape|setChartType|setVisibleRange|takeScreenshot)\s*\(|dispatchEvent\(\s*new\s+KeyboardEvent/;
+const WRITE_EXPRESSION = /\b(setSymbol|setResolution|createStudy|removeEntity|setInputValues|executeActionById|saveChartToServer|loadChartFromServer|createNewLayout|removeAllStudies|setVisible|applyStudyTemplate|removeAllShapes|createShape|createMultipointShape|setChartType|setVisibleRange)\s*\(|dispatchEvent\(\s*new\s+KeyboardEvent/;
 const WRITE_METHOD = /^(Input\.|Page\.(navigate|reload)|Target\.(activateTarget|createTarget|closeTarget)|Emulation\.)/;
 const WRITE_HTTP = /^\/json\/(activate|new|close)/;
 function writesIn(entries) {
@@ -58,6 +59,8 @@ const CALLS = {
   replay_status: [{}], layout_list: [{}], pane_list: [{}], tab_list: [{}],
   tv_health_check: [{}], tv_discover: [{}], tv_ui_state: [{}], ui_find_element: [{ query: 'Pine' }],
   capture_screenshot: [{}, { region: 'chart' }, { method: 'api' }], watchlist_get: [{}], session_get: [{ date: '1999-01-01' }],
+  pine_get_source: [{}], pine_get_errors: [{}], pine_get_console: [{}], pine_editor_state: [{}],
+  indicator_search: [{ query: 'RSI' }],
 };
 
 const handlers = new Map();
@@ -83,14 +86,6 @@ describe('read tools never send a write', () => {
       assert.deepEqual(writesIn(entries).map(e => e.expression || e.method || e.path), [], `${name} sent a write`);
     });
   }
-
-  it('capture_screenshot method "api" (publishes a snapshot) is refused before reaching the page', async () => {
-    const start = fake.log.length;
-    const r = await handlers.get('capture_screenshot')({ method: 'api' });
-    assert.equal(r.isError, true);
-    assert.match(r.content[0].text, /SNAPSHOT_PUBLISH_DISABLED/);
-    assert.equal(fake.log.length, start);
-  });
 
   it('the detector catches real writes (positive control)', async () => {
     const chart = await import('../src/core/chart.js');
