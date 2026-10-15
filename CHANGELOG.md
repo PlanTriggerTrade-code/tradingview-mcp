@@ -2,6 +2,27 @@
 
 This fork tracks [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp). Entries list what differs from upstream `main`.
 
+## 2.3.1 — 2026-10-15
+
+### Desktop chart setup reliability
+
+- New tabs click the actual button rather than its surrounding container, wait for
+  the landing page, and verify the loaded layout ID and name before reporting success.
+- Pine opening filters virtualized picker rows, rejects ambiguous names, and verifies
+  editor contents against the selected saved version. A visible editor is not toggled closed.
+- Indicator search waits for delayed results on cold layouts.
+- `ui_evaluate` now awaits returned promises. Callback-wrapped saves return their completion
+  result; promise rejections and timeouts report failure rather than an empty success.
+  A timeout does not cancel page-side work: inspect the result before retrying a mutation.
+- Verified on Windows TradingView Desktop 3.4.1 through the MCP protocol: new layout,
+  switching between two saved scripts, indicator search, and a real save callback.
+  Offline regression and protection tests also pass; other platforms were not live-tested.
+
+**Updating:** run `git pull --ff-only` and `npm ci` in this fork's checkout, then restart
+or reconnect the TradingView MCP in your client. Existing processes keep the previous
+code until restarted. TradingView itself does not need restarting. Local protected-layout
+settings remain in the ignored `state/` directory; no personal configurations are shipped.
+
 ## 2.3.0 — 2026-10-14
 
 ### Chart protection: one rule, all tools enabled
@@ -82,17 +103,3 @@ Based on upstream `main` at `c05b8f5` (2026-07-28). Tested against TradingView D
 ### Dependencies
 
 - `@modelcontextprotocol/sdk` 1.32, `chrome-remote-interface` 0.34, `zod` declared directly. `npm audit`: 0 vulnerabilities.
-
-## 2026-10-15 — Desktop chart setup reliability
-
-- New tabs click the actual button rather than its inert container, wait for the
-  landing target, and confirm the loaded layout UID/name before returning success.
-- Pine opening filters virtualized picker rows, rejects ambiguous names, and
-  checks the editor source against the selected cloud version. Opening an already
-  visible editor no longer toggles it closed.
-- Indicator search waits for delayed results on cold layouts.
-- `ui_evaluate` awaits returned promises and propagates rejection/timeout, so a
-  callback-wrapped layout save returns its completion result instead of `{}`.
-- Live verification used a separate layout, switched Optimizer -> Surge Bot v12,
-  found Surge Bot in search, and confirmed a real save callback. No Pine code was
-  saved or compiled. Restart/reconnect an already running MCP to load these changes.

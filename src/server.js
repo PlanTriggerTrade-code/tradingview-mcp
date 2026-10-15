@@ -25,7 +25,7 @@ import { registerPineDevelopment } from './pine-development.js';
 const server = new McpServer(
   {
     name: 'tradingview',
-    version: '2.3.0',
+    version: '2.3.1',
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
