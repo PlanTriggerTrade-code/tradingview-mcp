@@ -82,3 +82,17 @@ Based on upstream `main` at `c05b8f5` (2026-07-28). Tested against TradingView D
 ### Dependencies
 
 - `@modelcontextprotocol/sdk` 1.32, `chrome-remote-interface` 0.34, `zod` declared directly. `npm audit`: 0 vulnerabilities.
+
+## 2026-10-15 — Desktop chart setup reliability
+
+- New tabs click the actual button rather than its inert container, wait for the
+  landing target, and confirm the loaded layout UID/name before returning success.
+- Pine opening filters virtualized picker rows, rejects ambiguous names, and
+  checks the editor source against the selected cloud version. Opening an already
+  visible editor no longer toggles it closed.
+- Indicator search waits for delayed results on cold layouts.
+- `ui_evaluate` awaits returned promises and propagates rejection/timeout, so a
+  callback-wrapped layout save returns its completion result instead of `{}`.
+- Live verification used a separate layout, switched Optimizer -> Surge Bot v12,
+  found Surge Bot in search, and confirmed a real save callback. No Pine code was
+  saved or compiled. Restart/reconnect an already running MCP to load these changes.

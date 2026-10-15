@@ -76,6 +76,17 @@ async function typeQuery(query) {
   await delay(1200);
 }
 
+// Search responses can arrive after the debounce on a cold layout.
+async function waitForResults() {
+  let result;
+  for (let i = 0; i < 20; i++) {
+    result = await evaluate(READ_RESULTS_JS);
+    if (!result?.open || result.results?.length) return result;
+    await delay(250);
+  }
+  return result;
+}
+
 async function closeDialog() {
   await evaluate(`
     (function() {
@@ -98,7 +109,7 @@ export async function searchStudies({ query, limit } = {}) {
   const cap = limit || 25;
   await openDialog();
   await typeQuery(query);
-  const res = await evaluate(READ_RESULTS_JS);
+  const res = await waitForResults();
   await closeDialog();
   if (!res || !res.open) throw new Error('Indicators dialog closed unexpectedly during search.');
   const results = (res.results || []).map(({ title, section }) => ({ title, section })).slice(0, cap);
@@ -118,6 +129,7 @@ export async function addStudyFromSearch({ query, match, section } = {}) {
 
   await openDialog();
   await typeQuery(query);
+  await waitForResults();
 
   const clicked = await evaluate(`
     (function() {

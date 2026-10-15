@@ -99,7 +99,8 @@ export const CLICK_PINE_BUTTON = `
   (function() {
     var btn = document.querySelector('[aria-label="Pine"]')
       || document.querySelector('[data-name="pine-dialog-button"]');
-    if (btn) btn.click();
+    var visible = [...document.querySelectorAll('.monaco-editor.pine-editor-monaco')].some(e => e.offsetParent !== null);
+    if (btn && !visible) btn.click();
   })()
 `;
 
@@ -162,9 +163,9 @@ const delay = (ms) => new Promise(r => setTimeout(r, ms));
 const EDITOR_STATE_JS = `
   (function() {
     var m = ${FIND_MONACO};
-    var title = null;
+    var title = document.querySelector('[data-qa-id="pine-script-title-button"]')?.textContent?.trim() || null;
     var nameBtns = document.querySelectorAll('[class*="nameButton"]');
-    for (var i = 0; i < nameBtns.length; i++) {
+    for (var i = 0; !title && i < nameBtns.length; i++) {
       if (nameBtns[i].offsetParent !== null) { title = (nameBtns[i].textContent || '').trim(); break; }
     }
     var versionLabel = null;
@@ -884,6 +885,14 @@ export async function newScript({ type = 'indicator', force = false } = {}) {
  * code into the previously bound script.
  * Guarded: refuses if the current buffer has unsaved changes (unless force).
  */
+export function resolveSavedScript(scripts, want) {
+  want = String(want).trim().toLowerCase();
+  const exact = scripts.filter(s => [s.name,s.title].some(t => (t || '').toLowerCase() === want));
+  const candidates = exact.length ? exact : scripts.filter(s => [s.name,s.title].some(t => (t || '').toLowerCase().includes(want)));
+  if (candidates.length > 1) throw new Error('Ambiguous script name; use the exact unique saved name or pine_development_load with script_id.');
+  return candidates[0];
+}
+
 export async function openScript({ name, force = false } = {}) {
   if (!name || !String(name).trim()) throw new Error('name is required.');
 
@@ -897,11 +906,14 @@ export async function openScript({ name, force = false } = {}) {
   const list = await listScripts();
   const want = String(name).trim().toLowerCase();
   const scripts = list.scripts || [];
-  const match = scripts.find(s => (s.name || '').toLowerCase() === want || (s.title || '').toLowerCase() === want)
-    || scripts.find(s => (s.name || '').toLowerCase().includes(want) || (s.title || '').toLowerCase().includes(want));
+  const match = resolveSavedScript(scripts, want);
   if (!match) throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
 
-  if (state.title === match.name && !state.unsaved) {
+  const remote = await evaluateAsync(`fetch('https://pine-facade.tradingview.com/pine-facade/get/'+encodeURIComponent(${JSON.stringify(match.id)})+'/'+encodeURIComponent(${JSON.stringify(match.version)}),{credentials:'include'}).then(r=>{if(!r.ok)throw Error('Cannot verify saved Pine source');return r.json()})`);
+  if (typeof remote?.source !== 'string') throw new Error('Saved Pine source missing');
+  const sourceMatches = async () => (await getSource()).source.replace(/\r\n/g,'\n') === remote.source.replace(/\r\n/g,'\n');
+
+  if (state.title === match.name && !state.unsaved && await sourceMatches()) {
     return { success: true, name: match.name, script_id: match.id, version: match.version, title: state.title, lines: state.line_count, already_open: true, opened: true, source: 'ui' };
   }
 
@@ -919,13 +931,23 @@ export async function openScript({ name, force = false } = {}) {
   }
   if (!dialogSeen) throw new Error('The "Open my script" dialog did not appear.');
 
-  // Rows ignore synthetic .click(); a real pointer click on the row's centre is required.
-  const row = await evaluate(exactTextRectJS(match.name, '[role="dialog"]'));
-  if (!row) {
-    await evaluate(clickDialogButtonJS('close menu'));
-    throw new Error(`"${match.name}" is not visible in the Open dialog (the list may be scrolled). Nothing was changed.`);
-  }
-  await realMouse(row.x, row.y);
+  // The picker is virtualized. Filter before locating its exact name row,
+  // and click the row container, not a nested text span.
+  const picked = await evaluateAsync(`(async()=>{
+    const dlg=document.querySelector('[data-name="open-user-script-dialog"]');
+    if(!dlg)throw Error('Exact saved-script picker unavailable');
+    const name=${JSON.stringify(match.name)};
+    const find=()=>[...dlg.querySelectorAll('[data-name="open-script-dialog-item-name"]')].filter(e=>e.textContent.trim()===name);
+    let rows=find();
+    if(!rows.length){const input=dlg.querySelector('input[type="text"]');if(input){
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,name);
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+      for(let i=0;i<20&&!rows.length;i++){await new Promise(r=>setTimeout(r,150));rows=find();}
+    }}
+    if(rows.length!==1)throw Error('Saved-script row missing or ambiguous');
+    rows[0].parentElement.click();return true;
+  })()`);
+  if (!picked) throw new Error('Saved-script row was not selected');
 
   let after = null;
   for (let i = 0; i < 25; i++) {
@@ -937,12 +959,12 @@ export async function openScript({ name, force = false } = {}) {
       await evaluate(clickDialogButtonJS("^(Don'?t save|Don’t save|Discard( changes)?|No)$"));
     }
     after = await evaluate(EDITOR_STATE_JS);
-    if (after && after.title === match.name) break;
+    if (after && after.title === match.name && await sourceMatches()) break;
   }
 
   if ((await openDialogs()).some(d => /Open my script/i.test(d.text))) await evaluate(clickDialogButtonJS('close menu'));
 
-  if (!after || after.title !== match.name) {
+  if (!after || after.title !== match.name || !await sourceMatches()) {
     throw new Error(`Clicked "${match.name}" but the editor title is "${after?.title}" — open did not complete.`);
   }
 

@@ -159,7 +159,7 @@ export async function newTab({ layout, name } = {}) {
       const before = await evalIn(`document.querySelectorAll('.tabs-container .tab').length`);
       const clicked = await evalIn(`
         (function() {
-          var btn = document.querySelector('[class*="create-new-tab"]');
+          var btn = document.querySelector('button[class*="create-new-tab"], [class*="create-new-tab"] button');
           if (!btn) return false;
           btn.click();
           return true;
@@ -170,20 +170,23 @@ export async function newTab({ layout, name } = {}) {
       const after = await evalIn(`document.querySelectorAll('.tabs-container .tab').length`);
       return { before, after };
     });
-    landing = await findLandingTarget();
+    for (let i = 0; i < 30 && !landing; i++) {
+      landing = await findLandingTarget();
+      if (!landing) await new Promise(r => setTimeout(r, 250));
+    }
   }
 
   if (!layout) {
     const state = await list();
     return {
-      success: shellCounts ? shellCounts.after > shellCounts.before : !!landing,
       action: 'new_tab_opened',
       note: 'Tab is on the layout picker. Call tab_new with layout: "new" or a saved layout name to open a chart in it.',
       ...state,
+      success: shellCounts ? shellCounts.after > shellCounts.before && !!landing : !!landing,
     };
   }
 
-  if (!landing) throw new Error('New tab opened but its landing page target was not found.');
+  if (!landing) throw new Error(`New-tab creation was not confirmed (tabs ${shellCounts?.before} -> ${shellCounts?.after}); no chart was changed.`);
 
   // Snapshot existing chart targets so we can spot the one the pick creates.
   const beforeResp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(3000) });
@@ -274,14 +277,24 @@ export async function newTab({ layout, name } = {}) {
   }
   if (!chartTarget) throw new Error(`Picked "${picked}" but no new chart target appeared.`);
 
-  // Give the chart a moment to boot, then follow it.
-  await new Promise(r => setTimeout(r, 2000));
+  // A URL change is not proof that the requested layout is loaded.
+  let loaded = null;
+  for (let i = 0; i < 40; i++) {
+    try {
+      loaded = await withTarget(chartTarget.id, ev => ev(`(()=>{const m=window.TradingViewApi?._chartWidgetCollection?.metaInfo;return m?{uid:m.uid.value(),name:m.name.value(),url:location.href}:null})()`));
+    } catch { /* renderer still starting */ }
+    if (loaded?.uid && loaded.name === picked && loaded.url.includes('/chart/' + loaded.uid + '/')) break;
+    loaded = null;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  if (!loaded) throw new Error('Requested layout did not finish loading; no chart mutations were attempted.');
   await reconnectTo(chartTarget.id);
   return {
     success: true,
     action: wantNew ? 'new_layout_created' : 'layout_opened_in_new_tab',
     layout: picked,
-    chart_id: chartTarget.url.match(/\/chart\/([^/?]+)/)?.[1] || null,
+    chart_id: loaded.uid,
+    target_id: chartTarget.id,
   };
 }
 
