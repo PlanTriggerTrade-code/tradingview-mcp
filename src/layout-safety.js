@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 // Tools that change nothing in TradingView.
 export const READ_TOOLS = new Set([
   'chart_get_state', 'chart_get_visible_range', 'symbol_info', 'symbol_search',
-  'quote_get', 'data_get_ohlcv', 'data_get_indicator', 'data_get_study_values',
+  'quote_get', 'data_get_ohlcv', 'data_export_ohlcv', 'data_get_indicator', 'data_get_study_values',
   'data_get_pine_lines', 'data_get_pine_labels', 'data_get_pine_boxes', 'data_get_pine_tables',
   'data_get_strategy_results', 'data_get_trades', 'data_get_equity', 'depth_get',
   'draw_list', 'draw_get_properties', 'alert_list', 'pine_check',

@@ -11,6 +11,8 @@ import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { startFakeCdp } from './helpers/fake-cdp.js';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // Expressions answering these keep the core functions going past their existence checks.
 // The Pine editor counts as found, so the Pine read tools go past their panel-opening wait.
@@ -51,6 +53,7 @@ const SOURCE = '//@version=6\nindicator("x")\nplot(close)\n';
 const CALLS = {
   chart_get_state: [{}], chart_get_visible_range: [{}], symbol_info: [{}], symbol_search: [{ query: 'BTC' }],
   quote_get: [{}, { symbol: 'BINANCE:BTCUSDT' }], data_get_ohlcv: [{ summary: true }, { count: 5 }],
+  data_export_ohlcv: [{ path: join(tmpdir(), 'tv-export-test', 'bars.csv') }],
   data_get_indicator: [{ entity_id: 'abc' }], data_get_study_values: [{}],
   data_get_pine_lines: [{}], data_get_pine_labels: [{}], data_get_pine_boxes: [{}], data_get_pine_tables: [{}],
   data_get_strategy_results: [{}], data_get_trades: [{}], data_get_equity: [{}], depth_get: [{}],

@@ -2,6 +2,8 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute } from 'node:path';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 500;
@@ -62,6 +64,43 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
       return results;
     })()
   `;
+}
+
+// Every bar loaded on the active chart, written to a CSV file (no 500-bar cap). Changes nothing in
+// TradingView: it only reads the bars already loaded. How much history is loaded is set by the
+// chart (chart_set_visible_range pages older bars in, up to the account's bar limit).
+export async function exportOhlcv({ path, from, to, _deps } = {}) {
+  if (!path || !isAbsolute(path) || !/\.csv$/i.test(path)) throw new Error('path must be an absolute .csv file path');
+  const ev = _deps?.evaluate || evaluate;
+  const data = await ev(`
+    (function() {
+      var ms = ${CHART_API}._chartWidget.model().mainSeries();
+      var bars = ms.bars();
+      if (!bars || typeof bars.lastIndex !== 'function' || bars.size() === 0) return null;
+      var info = null; try { info = ms.symbolInfo(); } catch (e) {}
+      var rows = [];
+      for (var i = bars.firstIndex(); i <= bars.lastIndex(); i++) {
+        var v = bars.valueAt(i);
+        if (v) rows.push([v[0], v[1], v[2], v[3], v[4], v[5] || 0]);
+      }
+      return { symbol: ms.symbol(), pro_name: info && info.pro_name, data_feed: info && info.exchange,
+        session: info && info.session, timezone: info && info.timezone, resolution: ms.interval(), rows: rows };
+    })()
+  `);
+  if (!data || !data.rows || data.rows.length === 0) throw new Error('No bars loaded on the active chart. The chart may still be loading.');
+  const lo = from == null ? -Infinity : Number(from);
+  const hi = to == null ? Infinity : Number(to);
+  const rows = data.rows.filter(r => r[0] >= lo && r[0] <= hi);
+  if (rows.length === 0) throw new Error('No loaded bars fall inside from/to.');
+  const lines = ['time,time_utc,open,high,low,close,volume'];
+  for (const r of rows) lines.push(`${r[0]},${new Date(r[0] * 1000).toISOString()},${r[1]},${r[2]},${r[3]},${r[4]},${r[5]}`);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, lines.join('\n') + '\n', 'utf8');
+  return {
+    success: true, path, rows: rows.length, symbol: data.pro_name || data.symbol, data_feed: data.data_feed,
+    resolution: data.resolution, session: data.session, timezone: data.timezone,
+    first: new Date(rows[0][0] * 1000).toISOString(), last: new Date(rows[rows.length - 1][0] * 1000).toISOString(),
+  };
 }
 
 export async function getOhlcv({ count, summary } = {}) {

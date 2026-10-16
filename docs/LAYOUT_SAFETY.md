@@ -61,6 +61,7 @@ Copy [`protected-layouts.example.json`](../protected-layouts.example.json) to
 | `symbol_search` | read | TradingView's public search API; no chart access. |
 | `quote_get` | read | Quote session snapshot; never touches the chart. |
 | `data_get_ohlcv` | read | Reads loaded bars. |
+| `data_export_ohlcv` | read | Writes the loaded bars to a local CSV file. |
 | `data_get_indicator` | read | Reads a study's inputs. |
 | `data_get_study_values` | read | Reads study values. |
 | `data_get_pine_lines` | read | Reads Pine drawings. |

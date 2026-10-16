@@ -259,6 +259,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | `data_get_study_values` | Read current RSI, MACD, BB, EMA values from all indicators | ~500B |
 | `quote_get` | Get latest price, OHLC, volume | ~200B |
 | `data_get_ohlcv` | Get price bars. **Use `summary: true`** for compact stats | 500B (summary) / 8KB (100 bars) |
+| `data_export_ohlcv` | Write every loaded bar to a CSV file (no 500-bar cap); load history first with `chart_set_visible_range` | ~300B |
 
 ### Custom Indicator Data (Pine Drawings)
 

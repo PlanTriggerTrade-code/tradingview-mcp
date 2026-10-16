@@ -44,7 +44,7 @@ const {
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const READ = ['chart_get_state', 'chart_get_visible_range', 'symbol_info', 'symbol_search', 'quote_get',
-  'data_get_ohlcv', 'data_get_indicator', 'data_get_study_values', 'data_get_pine_lines', 'data_get_pine_labels',
+  'data_get_ohlcv', 'data_export_ohlcv', 'data_get_indicator', 'data_get_study_values', 'data_get_pine_lines', 'data_get_pine_labels',
   'data_get_pine_boxes', 'data_get_pine_tables', 'data_get_strategy_results', 'data_get_trades', 'data_get_equity',
   'depth_get', 'draw_list', 'draw_get_properties', 'alert_list', 'pine_check', 'pine_list_scripts', 'pine_analyze',
   'replay_status', 'layout_list', 'pane_list', 'tab_list', 'tv_health_check', 'tv_discover', 'tv_ui_state',
