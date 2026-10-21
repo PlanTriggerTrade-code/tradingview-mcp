@@ -2,6 +2,14 @@
 
 This fork tracks [tradesdontlie/tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp). Entries list what differs from upstream `main`.
 
+## Unreleased
+
+### Tool annotations
+
+- Every tool declares MCP annotations from its layout-guard class: read tools `readOnlyHint: true`,
+  all others `false`, and the five deleting tools `destructiveHint: true`. Clients can tell reads
+  from writes without parsing descriptions; the guard is unchanged.
+
 ## 2.3.1 — 2026-10-15
 
 ### Desktop chart setup reliability

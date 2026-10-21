@@ -19,7 +19,7 @@ import { followActiveTab, withTimeout, CDP_HOST, CDP_PORT, evaluate, evaluateAsy
 import CDP from 'chrome-remote-interface';
 import { z } from 'zod';
 import { booleanParam } from './tools/_schema.js';
-import { protectRegistrations } from './layout-safety.js';
+import { protectRegistrations, annotateRegistrations } from './layout-safety.js';
 import { registerPineDevelopment } from './pine-development.js';
 
 const server = new McpServer(
@@ -93,6 +93,8 @@ const connect = async (target) => {
   };
 };
 const listTargets = () => CDP.List({ host: CDP_HOST, port: CDP_PORT });
+// Annotations (read-only / destructive hints) for every tool, from the guard's classes.
+annotateRegistrations(server);
 registerPineDevelopment(server, { z, connect, listTargets, bool: booleanParam });
 // Untargeted tools act on the tab the user is looking at: before each call the guard re-attaches
 // the shared connection if they've switched TradingView tabs (followActiveTab). Chart-bound tools

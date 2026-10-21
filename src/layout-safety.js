@@ -58,6 +58,24 @@ export function classify(name) {
   return 'disabled'; // a tool nobody has reviewed yet
 }
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+// MCP tool annotations from the classes above, so clients (Codex, Claude) see which tools only
+// read: readOnlyHint is true exactly for the read class; destructiveHint marks the tools that
+// delete something. Hints only describe a tool; the guard still decides what runs.
+export const DESTRUCTIVE_TOOLS = new Set(['alert_delete', 'watchlist_remove', 'tab_close', 'draw_clear', 'draw_remove_one']);
+export function toolAnnotations(name) {
+  return classify(name) === 'read'
+    ? { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
+    : { readOnlyHint: false, destructiveHint: DESTRUCTIVE_TOOLS.has(name), idempotentHint: false };
+}
+/** Install first (before any tool registers): every (name, description, shape, handler)
+ *  registration gets its annotations. Other forms pass through unchanged. */
+export function annotateRegistrations(server) {
+  const register = server.tool.bind(server);
+  server.tool = (...registration) => registration.length === 4 && typeof registration[0] === 'string'
+    ? register(registration[0], registration[1], registration[2], toolAnnotations(registration[0]), registration[3])
+    : register(...registration);
+}
 // Working files (protected-layouts.json, backups/, locks/) live in the repository's state/ folder,
 // found from this module's location so the process working directory does not matter.
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'state');

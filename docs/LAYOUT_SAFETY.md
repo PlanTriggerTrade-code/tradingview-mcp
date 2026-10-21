@@ -151,3 +151,10 @@ Copy [`protected-layouts.example.json`](../protected-layouts.example.json) to
 | `pine_development_inspect` | checked | Opens the Pine panel on an explicit tab and layout. |
 | `pine_development_load` | checked | Binds the editor to an exact saved script. |
 | `pine_development_update` | checked | Backs up, saves and compiles a script, with a verified cloud save. |
+
+Every tool also carries MCP annotations derived from its class (`annotateRegistrations`,
+`toolAnnotations` in `src/layout-safety.js`): `readOnlyHint: true` for exactly the read class,
+`false` for everything else, and `destructiveHint: true` for the tools that delete something
+(`alert_delete`, `watchlist_remove`, `tab_close`, `draw_clear`, `draw_remove_one`). Clients such as
+Codex and Claude read these hints when deciding what to ask about; they describe a tool and grant
+nothing, the guard above still decides what runs.

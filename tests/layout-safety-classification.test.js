@@ -37,7 +37,7 @@ const GROUPS = await Promise.all(['health', 'chart', 'pine', 'data', 'capture', 
 }));
 const { registerPineDevelopment } = await import('../src/pine-development.js');
 const {
-  protectRegistrations, classify, READ_TOOLS, ACCOUNT_TOOLS, CHART_TOOLS, PINE_SAVE_TOOLS, GUARD_TOOLS, ROOT,
+  protectRegistrations, annotateRegistrations, toolAnnotations, DESTRUCTIVE_TOOLS, classify, READ_TOOLS, ACCOUNT_TOOLS, CHART_TOOLS, PINE_SAVE_TOOLS, GUARD_TOOLS, ROOT,
   DISABLED_MARK, CHECKED_NOTE, SNAPSHOT, IDENTITY, EDITOR_SCRIPT_IDS, PROTECTION_FILE,
 } = await import('../src/layout-safety.js');
 
@@ -366,6 +366,7 @@ describe('account tools (fake active tab)', () => {
 describe('layout guard on a real MCP server (zod v4, in memory)', () => {
   async function connected({ connect = noConnect, active } = {}) {
     const server = new McpServer({ name: 'guard-test', version: '0.0.0' });
+    annotateRegistrations(server);
     registerPineDevelopment(server, { z, connect, root, listTargets: async () => assert.fail('listed targets'), bool: booleanParam });
     protectRegistrations(server, { z, connect, root, active, bool: booleanParam });
     for (const register of GROUPS) register(server);
@@ -390,6 +391,22 @@ describe('layout guard on a real MCP server (zod v4, in memory)', () => {
         assert.ok(!t.inputSchema.properties?.user_approved, name);
       }
     }
+    await client.close();
+  });
+
+  it('annotates every tool from its class: read tools read-only, deleting tools destructive', async () => {
+    const client = await connected();
+    const { tools } = await client.listTools();
+    let readOnly = 0;
+    for (const t of tools) {
+      const read = classify(t.name) === 'read';
+      assert.equal(t.annotations?.readOnlyHint, read, t.name);
+      assert.equal(t.annotations?.destructiveHint, !read && DESTRUCTIVE_TOOLS.has(t.name), t.name);
+      assert.deepEqual(t.annotations, toolAnnotations(t.name), t.name);
+      if (read) readOnly += 1;
+    }
+    assert.equal(readOnly, READ.length + Object.values(GUARD_TOOLS).filter(c => c === 'read').length);
+    for (const name of DESTRUCTIVE_TOOLS) assert.ok(tools.some(t => t.name === name), `${name} exists`);
     await client.close();
   });
 
