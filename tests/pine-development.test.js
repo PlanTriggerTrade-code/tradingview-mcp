@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {assertEditor,registerPineDevelopment} from '../src/pine-development.js';
-import {canonicalSource,updatePine,EDITOR_STATE,usesScript} from '../src/pine-development.js';
+import {canonicalSource,sameSourceExpression,updatePine,EDITOR_STATE,usesScript} from '../src/pine-development.js';
 import {SNAPSHOT} from '../src/layout-safety.js';
 import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -30,7 +30,8 @@ test('pine_development_open refuses an invalid layout ID before opening a tab',a
 
 test('exact staged source can resume, and cloud CRLF is content-equivalent',()=>{
  assert.doesNotThrow(()=>assertEditor({...editor,source:source+'// desired'},remote,hash(source+'// desired'),source+'// desired'));
- assert.equal(canonicalSource('a\r\nb\r\n'),'a\nb\n');
+ assert.equal(canonicalSource('a\r\nb\r\n'),'a\nb');
+ assert.equal(canonicalSource('a\rb\n\n'),canonicalSource('a\nb'));
  assert.notEqual(canonicalSource('a\r\nc'),canonicalSource('a\nb'));
 });
 
@@ -57,7 +58,7 @@ function devPage(state,ctx){
    ctx.writes.push(e);
    if(e.includes('m.editor.setValue'))ctx.current=desired;
    if(e.includes('pine-script-save-button')){ctx.saved=ctx.current.replace(/\n/g,'\r\n');ctx.version='11.0';}
-   if(e.includes('await action.run()')){assert.equal(canonicalSource(ctx.saved),desired);ctx.compiles++;state.state.charts[0].panes[0].sources.push({id:'new-study'});}
+   if(e.includes('await action.run()')){assert.equal(canonicalSource(ctx.saved),canonicalSource(desired));ctx.compiles++;state.state.charts[0].panes[0].sources.push({id:'new-study'});}
    value=true;
   }else if(e.includes('return {studies:'))value={studies:[]};
   else if(e.includes('getAllStudies'))value=[{name:'Example',inputs:['Trial ID']}];
@@ -168,4 +169,16 @@ test('pine_development inspect, load and update refuse a protected chart without
    }
   }
  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+// The editor normalizes what it is given (CRLF to LF, final newline): the in-page check must accept
+// that text as the same source and still refuse a different one (2026-10-21: an upload stopped with
+// PINE_EDITOR_CHANGED only because of line endings).
+test('the in-page editor check treats line endings and the final newline as the same source',()=>{
+ const check=(editorText,source)=>new Function(`return ${sameSourceExpression(JSON.stringify(editorText),source)}`)();
+ assert.equal(check('a\nb\n','a\r\nb\r\n'),true);
+ assert.equal(check('a\nb','a\r\nb\r\n'),true);
+ assert.equal(check('a\nb\n','a\nb'),true);
+ assert.equal(check('a\nc\n','a\r\nb\r\n'),false);
+ assert.equal(new Function(`return ${sameSourceExpression('undefined','a')}`)(),false);
 });

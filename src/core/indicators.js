@@ -203,13 +203,16 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps }) {
       for (var i = 0; i < before.length; i++) known[before[i].id] = true;
       var unknown = Object.keys(overrides).filter(function(k) { return !known[k]; });
 
-      // Build a FRESH array instead of mutating the live one the study handed back.
-      var snapshot = before.map(function(x) { return { id: x.id, value: x.value }; });
-      var fresh = before.map(function(x) {
-        return { id: x.id, value: overrides.hasOwnProperty(x.id) ? overrides[x.id] : x.value };
-      });
+      // Write only the inputs being changed. Writing every input back round-trips values the
+      // study reports in another form than it accepts (colour inputs read back as numbers but
+      // must be written as colour strings): TradingView then rejects the whole write and clears
+      // the inputs, and a full restore fails the same way (2026-10-21).
+      var changes = Object.keys(overrides).filter(function(k) { return known[k]; })
+        .map(function(k) { return { id: k, value: overrides[k] }; });
+      var snapshot = before.filter(function(x) { return overrides.hasOwnProperty(x.id); })
+        .map(function(x) { return { id: x.id, value: x.value }; });
 
-      study.setInputValues(fresh);
+      if (changes.length > 0) study.setInputValues(changes);
       var after = study.getInputValues() || [];
 
       // An emptied array means the write was rejected outright. Put it back.

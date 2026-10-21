@@ -10,6 +10,15 @@ This fork tracks [tradesdontlie/tradingview-mcp](https://github.com/tradesdontli
   all others `false`, and the five deleting tools `destructiveHint: true`. Clients can tell reads
   from writes without parsing descriptions; the guard is unchanged.
 
+### Fixes
+
+- `indicator_set_inputs` writes only the inputs being changed. It used to write every input back,
+  and colour inputs read back as numbers but must be written as colour strings, so TradingView
+  rejected the whole write, cleared the study's inputs and the restore failed the same way.
+- `pine_development_update` compares the editor's text with the source without line endings and
+  the final newline (the editor normalizes them), so a CRLF file no longer stops with
+  `PINE_EDITOR_CHANGED`.
+
 ## 2.3.1 — 2026-10-15
 
 ### Desktop chart setup reliability

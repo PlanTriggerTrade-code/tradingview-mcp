@@ -21,7 +21,11 @@ export const EDITOR_STATE = `(()=>{const m=${EDITOR};if(!m)return null;
  errors:m.env.editor.getModelMarkers({resource:model.uri}).filter(x=>x.severity===8).map(x=>({line:x.startLineNumber,message:x.message})),
  actions:m.editor.getSupportedActions().map(x=>x.id)};
 })()`;
-export const canonicalSource=s=>s.replace(/\r\n/g,'\n');
+// Content equality for Pine source: TradingView's editor and cloud normalize line endings (CRLF and
+// lone CR become LF) and may add or drop the final newline, so compare without those.
+export const canonicalSource=s=>s.replace(/\r\n?/g,'\n').replace(/\n+$/,'');
+// The same comparison as a page expression: true when the editor text (valueExpr) is source.
+export const sameSourceExpression=(valueExpr,source)=>`((${valueExpr})??'').replace(/\\r\\n?/g,'\\n').replace(/\\n+$/,'')===${JSON.stringify(canonicalSource(source))}`;
 const q=JSON.stringify;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 export function titleOf(source) {return source.match(/(?:strategy|indicator|library)\(\s*"([^"]+)"/)?.[1];}
@@ -69,12 +73,12 @@ export async function updatePine(args,deps) {
    await run(guardedExpression(before,`${checkEditor} document.querySelector('[data-name="open-user-script-dialog"] [data-qa-id="close"]')?.click();m.editor.setValue(${q(args.source)});`));
    // Save through the Pine toolbar first; never depend on an unsaved-add confirmation.
    const preSave=await run(SNAPSHOT);validate(preSave,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot,approved:args.user_approved===true});
-   await run(guardedExpression(preSave,`const m=${EDITOR};if(m?.editor.getValue()!==${q(args.source)}||document.querySelector('[data-qa-id="pine-script-title-button"]')?.innerText?.trim()!==${q(editor.title)})throw Error('PINE_EDITOR_CHANGED');const b=document.querySelector('[data-qa-id="pine-script-save-button"]');if(!b)throw Error('PINE_SAVE_BUTTON_UNAVAILABLE');if(!b.disabled)b.click();`));
+   await run(guardedExpression(preSave,`const m=${EDITOR};if(!(${sameSourceExpression('m?.editor.getValue()',args.source)})||document.querySelector('[data-qa-id="pine-script-title-button"]')?.innerText?.trim()!==${q(editor.title)})throw Error('PINE_EDITOR_CHANGED');const b=document.querySelector('[data-qa-id="pine-script-save-button"]');if(!b)throw Error('PINE_SAVE_BUTTON_UNAVAILABLE');if(!b.disabled)b.click();`));
    let cloud;
    for(let i=0;i<100;i++){await (deps.delay||delay)(500);cloud=await remoteScript(run,args.script_id);if(canonicalSource(cloud.source)===canonicalSource(args.source))break;if(i===99)throw Error('PINE_CLOUD_SAVE_NOT_CONFIRMED');}
    // No global keyboard shortcut or generic Save button. Recheck layout and editor before compiling.
    before=await run(SNAPSHOT);validate(before,{layout_id:args.layout_id,chart_id:args.chart_id},{protection:prot,approved:args.user_approved===true});
-   await run(guardedExpression(before,`const m=${EDITOR};if(m?.editor.getValue()!==${q(args.source)})throw Error('PINE_SOURCE_CHANGED');
+   await run(guardedExpression(before,`const m=${EDITOR};if(!(${sameSourceExpression('m?.editor.getValue()',args.source)}))throw Error('PINE_SOURCE_CHANGED');
     const pending=[...document.querySelectorAll('[data-qa-id="no-btn"]')].filter(b=>b.parentElement?.parentElement?.textContent.includes("Save this script before adding?"));if(pending.length>1)throw Error('AMBIGUOUS_PINE_CONFIRMATION');pending[0]?.click();m.editor.focus();
     const action=m.editor.getSupportedActions().find(x=>x.id.endsWith(':add.to.chart'));
     if(!action)throw Error('PINE_COMPILE_ACTION_UNAVAILABLE');await action.run();`));
