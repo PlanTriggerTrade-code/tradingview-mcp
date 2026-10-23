@@ -18,6 +18,16 @@ register('ohlcv', {
   }),
 });
 
+register('ohlcv-export', {
+  description: 'Write every bar loaded on the active chart to a CSV file (read-only)',
+  options: {
+    out: { type: 'string', short: 'o', description: 'Absolute path of the .csv file to write' },
+    from: { type: 'string', description: 'Only bars at or after this unix time (seconds)' },
+    to: { type: 'string', description: 'Only bars at or before this unix time (seconds)' },
+  },
+  handler: (opts) => core.exportOhlcv({ path: opts.out, from: opts.from, to: opts.to }),
+});
+
 register('values', {
   description: 'Get indicator values (last_bar_values = latest bar; values = data window, follows the crosshair)',
   handler: () => core.getStudyValues(),

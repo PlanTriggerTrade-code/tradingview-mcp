@@ -76,6 +76,17 @@ async function typeQuery(query) {
   await delay(1200);
 }
 
+// Search responses can arrive after the debounce on a cold layout.
+async function waitForResults() {
+  let result;
+  for (let i = 0; i < 20; i++) {
+    result = await evaluate(READ_RESULTS_JS);
+    if (!result?.open || result.results?.length) return result;
+    await delay(250);
+  }
+  return result;
+}
+
 async function closeDialog() {
   await evaluate(`
     (function() {
@@ -98,7 +109,7 @@ export async function searchStudies({ query, limit } = {}) {
   const cap = limit || 25;
   await openDialog();
   await typeQuery(query);
-  const res = await evaluate(READ_RESULTS_JS);
+  const res = await waitForResults();
   await closeDialog();
   if (!res || !res.open) throw new Error('Indicators dialog closed unexpectedly during search.');
   const results = (res.results || []).map(({ title, section }) => ({ title, section })).slice(0, cap);
@@ -118,6 +129,7 @@ export async function addStudyFromSearch({ query, match, section } = {}) {
 
   await openDialog();
   await typeQuery(query);
+  await waitForResults();
 
   const clicked = await evaluate(`
     (function() {
@@ -191,13 +203,16 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps }) {
       for (var i = 0; i < before.length; i++) known[before[i].id] = true;
       var unknown = Object.keys(overrides).filter(function(k) { return !known[k]; });
 
-      // Build a FRESH array instead of mutating the live one the study handed back.
-      var snapshot = before.map(function(x) { return { id: x.id, value: x.value }; });
-      var fresh = before.map(function(x) {
-        return { id: x.id, value: overrides.hasOwnProperty(x.id) ? overrides[x.id] : x.value };
-      });
+      // Write only the inputs being changed. Writing every input back round-trips values the
+      // study reports in another form than it accepts (colour inputs read back as numbers but
+      // must be written as colour strings): TradingView then rejects the whole write and clears
+      // the inputs, and a full restore fails the same way (2026-10-21).
+      var changes = Object.keys(overrides).filter(function(k) { return known[k]; })
+        .map(function(k) { return { id: k, value: overrides[k] }; });
+      var snapshot = before.filter(function(x) { return overrides.hasOwnProperty(x.id); })
+        .map(function(x) { return { id: x.id, value: x.value }; });
 
-      study.setInputValues(fresh);
+      if (changes.length > 0) study.setInputValues(changes);
       var after = study.getInputValues() || [];
 
       // An emptied array means the write was rejected outright. Put it back.

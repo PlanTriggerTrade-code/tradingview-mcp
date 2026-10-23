@@ -17,6 +17,12 @@ Personal AI assistant for your TradingView Desktop charts. Connects Claude Code 
 > [!CAUTION]
 > This tool accesses undocumented internal TradingView APIs via the Electron debug interface. These can change or break without notice in any TradingView update. Pin your TradingView Desktop version if stability matters to you.
 
+## Chart protection
+
+**The assistant never changes one of your protected charts without your yes.** List those charts in `state/protected-layouts.json`; every other chart, and every read, is free. Before a tool changes anything, it checks which layout is actually loaded in the tab it acts on (not just the URL); on a protected chart it is refused until you say yes, and the assistant then passes `user_approved: true`.
+
+To protect charts, copy [`protected-layouts.example.json`](protected-layouts.example.json) to `state/protected-layouts.json` and list their IDs (from `https://www.tradingview.com/chart/<id>/`) or name patterns. The `state/` folder is ignored by Git. Details: [docs/LAYOUT_SAFETY.md](docs/LAYOUT_SAFETY.md).
+
 ## About this fork
 
 Tested against TradingView Desktop **3.4.1** (Windows, Microsoft Store build). Highlights:
@@ -29,6 +35,7 @@ Tested against TradingView Desktop **3.4.1** (Windows, Microsoft Store build). H
 - **`tv_launch` never kills a working session**, and every CDP call has a timeout so a hung TradingView can't freeze your AI client.
 - **Safer**: no self-update tool or GitHub phone-home, injection-safe tool inputs, `"false"` no longer read as true (that used to delete all alerts), 0 npm audit findings.
 - **`morning_brief`** watchlist scan from [LewisWJackson/tradingview-mcp-jackson](https://github.com/LewisWJackson/tradingview-mcp-jackson), with its path checks fixed for Windows.
+- **Chart protection.** Your protected charts change only with your yes; everything else works. See [Chart protection](#chart-protection).
 
 ### The debug port, in one paragraph
 
@@ -242,6 +249,8 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 
 ## Tool Reference (87 MCP tools)
 
+> All tools work. On a protected chart, tools that change it need `user_approved: true` (see [Chart protection](#chart-protection)). The chart-protection tools (`layout_safety_inspect`, `study_inputs_get`, `strategy_trades_get`, `pine_development_*`) and the tool classes are in [docs/LAYOUT_SAFETY.md](docs/LAYOUT_SAFETY.md).
+
 ### Chart Reading
 
 | Tool | When to use | Output size |
@@ -250,6 +259,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | `data_get_study_values` | Read current RSI, MACD, BB, EMA values from all indicators | ~500B |
 | `quote_get` | Get latest price, OHLC, volume | ~200B |
 | `data_get_ohlcv` | Get price bars. **Use `summary: true`** for compact stats | 500B (summary) / 8KB (100 bars) |
+| `data_export_ohlcv` | Write every loaded bar to a CSV file (no 500-bar cap); load history first with `chart_set_visible_range` | ~300B |
 
 ### Custom Indicator Data (Pine Drawings)
 
@@ -366,6 +376,8 @@ The key flag: `--remote-debugging-port=9222`
 ```bash
 # Requires TradingView running with --remote-debugging-port=9222
 npm test
+# Layout guard tests only (no TradingView connection)
+npm run test:safety
 ```
 
 29 tests covering: Pine Script static analysis, server-side compilation, and CLI routing.

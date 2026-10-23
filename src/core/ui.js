@@ -302,7 +302,7 @@ export async function findElement({ query, strategy }) {
   return { success: true, query, strategy: strat, count: results?.length || 0, elements: results || [] };
 }
 
-export async function uiEvaluate({ expression }) {
-  const result = await evaluate(expression);
+export async function uiEvaluate({ expression }, run = evaluateAsync) {
+  const result = await run(expression);
   return { success: true, result };
 }

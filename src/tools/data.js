@@ -12,6 +12,15 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('data_export_ohlcv', 'Write every bar loaded on the active chart (no 500-bar cap) to a CSV file: time (unix s, bar open), time_utc, open, high, low, close, volume. Read-only; load older history first with chart_set_visible_range.', {
+    path: z.string().describe('Absolute path of the .csv file to write'),
+    from: z.coerce.number().optional().describe('Only bars at or after this unix time (seconds)'),
+    to: z.coerce.number().optional().describe('Only bars at or before this unix time (seconds)'),
+  }, async ({ path, from, to }) => {
+    try { return jsonResult(await core.exportOhlcv({ path, from, to })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('data_get_indicator', 'Get indicator/study info and input values', {
     entity_id: z.string().describe('Study entity ID (from chart_get_state)'),
   }, async ({ entity_id }) => {

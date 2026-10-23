@@ -6,3 +6,6 @@ temp_*
 discovery-log.json
 rules.json
 scripts/tradingview.ico
+
+# Layout guard working files (scratch registry, backups, locks): see docs/LAYOUT_SAFETY.md
+state/

@@ -189,3 +189,45 @@ describe('setInputs — guards', () => {
     );
   });
 });
+
+// The real page code against a fake study that behaves like TradingView with colour inputs: they
+// read back as numbers, and a write that carries a number for a colour input is rejected and
+// clears every input. Writing back untouched inputs used to trip this (2026-10-21).
+describe('setInputs — page code with colour inputs', () => {
+  function tradingViewStudy() {
+    const types = { in_0: 'integer', in_1: 'color', in_2: 'color' };
+    let inputs = [{ id: 'in_0', value: 14 }, { id: 'in_1', value: 4294901760 }, { id: 'in_2', value: 4278255360 }];
+    const writes = [];
+    const study = {
+      getInputValues: () => inputs.map((x) => ({ ...x })),
+      setInputValues: (values) => {
+        writes.push(values.map((v) => v.id));
+        if (values.some((v) => types[v.id] === 'color' && typeof v.value === 'number')) { inputs = []; return; }
+        const by = new Map(values.map((v) => [v.id, v.value]));
+        inputs = inputs.map((x) => (by.has(x.id) ? { id: x.id, value: by.get(x.id) } : x));
+      },
+    };
+    return { study, writes, current: () => inputs };
+  }
+  const run = (fake) => async (expression) => {
+    globalThis.window = { TradingViewApi: { _activeChartWidgetWV: { value: () => ({ getStudyById: () => fake.study }) } } };
+    try { return new Function(`return (${expression})`)(); } finally { delete globalThis.window; }
+  };
+
+  it('changes one input without rewriting the colour inputs', async () => {
+    const fake = tradingViewStudy();
+    const r = await setInputs({ entity_id: 'study_1', inputs: { in_0: 20 }, _deps: { evaluate: run(fake) } });
+    assert.equal(r.success, true);
+    assert.deepEqual(r.updated_inputs, { in_0: 20 });
+    assert.deepEqual(fake.writes, [['in_0']]);
+    assert.deepEqual(fake.current().map((x) => x.value), [20, 4294901760, 4278255360]);
+  });
+
+  it('writes a colour given as a string', async () => {
+    const fake = tradingViewStudy();
+    const r = await setInputs({ entity_id: 'study_1', inputs: { in_1: '#2962ff' }, _deps: { evaluate: run(fake) } });
+    assert.equal(r.success, true);
+    assert.deepEqual(fake.writes, [['in_1']]);
+    assert.equal(fake.current().length, 3);
+  });
+});

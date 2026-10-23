@@ -1,6 +1,10 @@
 # TradingView MCP — Claude Instructions
 
-87 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222). Tools act on the tab that's active in TradingView's tab bar.
+87 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222), plus 8 chart-protection tools. Tools act on the tab that's active in TradingView's tab bar.
+
+## Chart protection (read first)
+
+Never change one of the user's protected charts without their yes. A chart is protected when the layout actually loaded in the tab is listed in `state/protected-layouts.json` (by ID or name pattern; format: `protected-layouts.example.json`). Tools that may change a chart check the tab they act on and refuse a protected chart with `PROTECTED_CHART_NEEDS_PERMISSION`; pass `user_approved: true` only after the user said yes for that chart. Every other chart is free; reads always are. Never work around a refusal through raw CDP, the CLI or another tool. Details: [docs/LAYOUT_SAFETY.md](docs/LAYOUT_SAFETY.md).
 
 ## Decision Tree — Which Tool When
 
